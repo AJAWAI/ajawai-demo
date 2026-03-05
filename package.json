@@ -1,0 +1,22 @@
+{
+  "name": "ajawai-demo-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "pwa",
+    "relay",
+    "shared"
+  ],
+  "scripts": {
+    "build:shared": "npm --workspace shared run build",
+    "dev:pwa": "npm run build:shared && npm --workspace pwa run dev",
+    "dev:relay": "npm run build:shared && npm --workspace relay run dev",
+    "dev": "npm run build:shared && concurrently \"npm --workspace pwa run dev\" \"npm --workspace relay run dev\"",
+    "build": "npm --workspace shared run build && npm --workspace relay run build && npm --workspace pwa run build",
+    "typecheck": "npm --workspace shared run typecheck && npm --workspace relay run typecheck && npm --workspace pwa run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}
