@@ -78,6 +78,7 @@ export const useAjawaiSystem = (session: Session) => {
     at: string;
   } | null>(null);
   const [debugTraces, setDebugTraces] = useState<CommandDebugInfo[]>([]);
+  const [lastSuccessfulSyncAt, setLastSuccessfulSyncAt] = useState<string | null>(null);
   const activeRunId = useRef<number | null>(null);
   const runCounter = useRef(0);
 
@@ -97,6 +98,9 @@ export const useAjawaiSystem = (session: Session) => {
       const result = await syncWithSupabase(user.id);
       setSyncState(result);
       setPendingSync(!result.synced);
+      if (result.synced) {
+        setLastSuccessfulSyncAt(result.at);
+      }
       await refreshSnapshot();
       return result;
     } catch (error) {
@@ -146,6 +150,9 @@ export const useAjawaiSystem = (session: Session) => {
           const preloadSync = await syncWithSupabase(user.id);
           setSyncState(preloadSync);
           setPendingSync(!preloadSync.synced);
+          if (preloadSync.synced) {
+            setLastSuccessfulSyncAt(preloadSync.at);
+          }
         }
         await picoClawManager.bootstrap(user.id);
         await refreshSnapshot();
@@ -431,6 +438,7 @@ export const useAjawaiSystem = (session: Session) => {
     retryLastCommand,
     resetThinkingState,
     debugTraces,
+    lastSuccessfulSyncAt,
     approve,
     reject,
     syncNow,

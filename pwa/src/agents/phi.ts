@@ -31,7 +31,13 @@ export interface PhiDebugMeta {
   mode: "heuristic" | "model" | "model_with_fallback";
   usedWeakRepair: boolean;
   usedSearchHeuristic: boolean;
+  normalizedPrompt: string;
   checkedAt: string;
+}
+
+export interface DirectAnswerOptions {
+  history?: ConversationTurn[];
+  memoryGuidance?: string;
 }
 
 const now = () => new Date().toISOString();
@@ -42,6 +48,7 @@ let lastPhiDebugMeta: PhiDebugMeta = {
   mode: "heuristic",
   usedWeakRepair: false,
   usedSearchHeuristic: false,
+  normalizedPrompt: "",
   checkedAt: now()
 };
 
@@ -81,6 +88,17 @@ const parseMemorySave = (input: string): { key: string; value: string } | null =
     if (key && value) {
       return { key, value };
     }
+  }
+  const preferMatch = statement.match(/i\s+prefer\s+(.+)$/i);
+  if (preferMatch?.[1]) {
+    const preference = preferMatch[1].trim().replace(/\.$/, "");
+    const key = /proposal|writing|tone|style/i.test(preference)
+      ? "proposal_style"
+      : "user_preference";
+    return {
+      key,
+      value: preference
+    };
   }
   return {
     key: "note",
@@ -138,6 +156,21 @@ const markPhiDebug = (next: Partial<PhiDebugMeta>) => {
     ...next,
     checkedAt: now()
   };
+};
+
+const normalizePromptForReasoning = (input: string) => {
+  const normalized = input
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\bwhat did you to do\b/gi, "what did you do")
+    .replace(/\bhow do i self improve inspire me\b/gi, "how can I improve myself and stay inspired")
+    .replace(/\bself improve\b/gi, "self-improve")
+    .replace(/\bimprove me\b/gi, "help me improve")
+    .replace(/\bi wanna\b/gi, "I want to")
+    .replace(/\bgonna\b/gi, "going to")
+    .replace(/\bpls\b/gi, "please")
+    .replace(/\bthx\b/gi, "thanks");
+  return normalized;
 };
 
 const sanitizeModelAnswer = (text: string) => {
@@ -263,6 +296,9 @@ const detectTargetLanguage = (prompt: string): SupportedTranslationLanguage | nu
 const splitTranslationPhrases = (input: string): string[] => {
   const normalized = input
     .replace(/\bwhat did you to do\b/gi, "what did you do")
+    .replace(/\b(how are you)\s+(what|where|when|why|how)\b/gi, "$1 ? $2")
+    .replace(/\b(where are you from)\s+(what|where|when|why|how)\b/gi, "$1 ? $2")
+    .replace(/\b(what are you doing)\s+(what|where|when|why|how)\b/gi, "$1 ? $2")
     .replace(/\bin\?\s*/gi, "? ")
     .replace(/\s+/g, " ")
     .trim();
@@ -654,13 +690,38 @@ const buildInvoiceFactoringReply = () => {
   ].join("\n");
 };
 
+const buildSelfImproveReply = () => {
+  return [
+    "You’re not behind — you’re building. The strongest self-improvement comes from small, consistent wins, not one big perfect day.",
+    "",
+    "Here’s a practical framework you can start today:",
+    "1) Pick one identity goal: \"I’m becoming disciplined and reliable.\"",
+    "2) Start tiny: 20 minutes daily on one high-impact habit.",
+    "3) Protect your focus: one deep-work block before checking distractions.",
+    "4) Train your body: sleep 7-8 hours, move daily, hydrate, and eat clean enough.",
+    "5) Upgrade your mind: read 10 pages/day and journal one lesson nightly.",
+    "6) Review weekly: what worked, what failed, what you’ll adjust next week.",
+    "",
+    "Mindset shift that helps:",
+    "- Don’t ask \"Am I motivated?\" Ask \"What’s my next small action?\"",
+    "- Confidence grows after action, not before it.",
+    "",
+    "Today’s action plan (simple):",
+    "- Write 3 priorities for tomorrow.",
+    "- Complete one 25-minute focused session on your top goal.",
+    "- End the day with one sentence: \"Today I improved by ___\".",
+    "",
+    "You can absolutely do this. If you want, I can build a 7-day self-improvement plan tailored to your schedule."
+  ].join("\n");
+};
+
 const buildFactualFallback = (prompt: string) => {
   const topic = extractTopicFromQuestion(prompt);
   return `I’m checking live sources for ${topic} and will provide a clear answer first, followed by concise supporting references.`;
 };
 
 const buildFriendlyConversationalReply = (prompt: string): string => {
-  const normalized = prompt.trim();
+  const normalized = normalizePromptForReasoning(prompt);
   const lower = normalized.toLowerCase();
 
   if (lower.includes("pesto recipe") || lower.includes("how to make pesto") || lower.includes("make pesto")) {
@@ -695,6 +756,15 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return buildInvoiceFactoringReply();
   }
 
+  if (
+    lower.includes("self-improve") ||
+    lower.includes("self improve") ||
+    lower.includes("improve myself") ||
+    (lower.includes("inspire me") && lower.includes("improve"))
+  ) {
+    return buildSelfImproveReply();
+  }
+
   if (lower.includes("richest person in the world") || lower.includes("who's the richest")) {
     return [
       "The richest person is currently reported as Elon Musk in most recent billionaire rankings.",
@@ -724,14 +794,11 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
   }
 
   const topic = extractTopicFromQuestion(normalized);
-  return [
-    `Answer: ${topic}.`,
-    "I can also format it as a checklist or step-by-step guide if you want."
-  ].join(" ");
+  return `Great question. Here is a practical answer about ${topic}: start with the core objective, break it into clear steps, and execute the first small action today.`;
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
-  const normalized = prompt.trim();
+  const normalized = normalizePromptForReasoning(prompt);
   const lower = normalized.toLowerCase();
   const emailMatches = normalized.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
 
@@ -966,7 +1033,11 @@ const buildPrompt = (prompt: string, history: ConversationTurn[]) => {
   ].join("\n");
 };
 
-const buildDirectAnswerPrompt = (prompt: string, history: ConversationTurn[]) => {
+const buildDirectAnswerPrompt = (
+  prompt: string,
+  history: ConversationTurn[],
+  memoryGuidance?: string
+) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Answer the user directly with a complete, useful response.",
@@ -974,6 +1045,7 @@ const buildDirectAnswerPrompt = (prompt: string, history: ConversationTurn[]) =>
     "Do not ask follow-up questions unless absolutely necessary.",
     "Do not use filler text.",
     `Conversation context:\n${formatConversationContext(history)}`,
+    memoryGuidance ? `User memory context:\n${memoryGuidance}` : "User memory context: none",
     `User request: ${prompt}`
   ].join("\n");
 };
@@ -1144,20 +1216,25 @@ export const getLastPhiDebugMeta = () => lastPhiDebugMeta;
 
 export const phiDirectAnswer = async (
   prompt: string,
-  history: ConversationTurn[] = []
+  options: DirectAnswerOptions = {}
 ): Promise<string> => {
-  const fallback = buildConciseFallbackAnswer(prompt);
+  const normalizedPrompt = normalizePromptForReasoning(prompt);
+  const history = options.history ?? [];
+  const fallback = buildConciseFallbackAnswer(normalizedPrompt);
   const generator = await initializeLocalPhi();
   if (!generator) {
     return fallback;
   }
 
   try {
-    const output = await generator(buildDirectAnswerPrompt(prompt, history), {
-      max_new_tokens: 420,
-      temperature: 0.4,
-      return_full_text: false
-    });
+    const output = await generator(
+      buildDirectAnswerPrompt(normalizedPrompt, history, options.memoryGuidance),
+      {
+        max_new_tokens: 420,
+        temperature: 0.4,
+        return_full_text: false
+      }
+    );
     const text = sanitizeModelAnswer(output[0]?.generated_text ?? "");
     if (!text || looksLikeWeakReply(text)) {
       return fallback;
@@ -1177,7 +1254,7 @@ export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Pr
 
   try {
     const output = await generator(buildSearchSynthesisPrompt(input), {
-      max_new_tokens: 380,
+      max_new_tokens: 420,
       temperature: 0.35,
       return_full_text: false
     });
@@ -1195,12 +1272,14 @@ export const phiLLM = async (
   prompt: string,
   history: ConversationTurn[] = []
 ): Promise<PhiResponse> => {
-  const deterministic = heuristicPhi(prompt);
+  const normalizedPrompt = normalizePromptForReasoning(prompt);
+  const deterministic = heuristicPhi(normalizedPrompt);
   if (deterministic.intent !== "conversational") {
     markPhiDebug({
       mode: "heuristic",
       usedWeakRepair: false,
-      usedSearchHeuristic: Boolean(deterministic.needs_web_search)
+      usedSearchHeuristic: Boolean(deterministic.needs_web_search),
+      normalizedPrompt
     });
     return deterministic;
   }
@@ -1210,14 +1289,15 @@ export const phiLLM = async (
     markPhiDebug({
       mode: "heuristic",
       usedWeakRepair: false,
-      usedSearchHeuristic: Boolean(deterministic.needs_web_search)
+      usedSearchHeuristic: Boolean(deterministic.needs_web_search),
+      normalizedPrompt
     });
     return deterministic;
   }
 
   try {
     const generateDirectAnswer = async () => {
-      const directOutput = await generator(buildDirectAnswerPrompt(prompt, history), {
+      const directOutput = await generator(buildDirectAnswerPrompt(normalizedPrompt, history), {
         max_new_tokens: 420,
         temperature: 0.45,
         return_full_text: false
@@ -1225,7 +1305,7 @@ export const phiLLM = async (
       return sanitizeModelAnswer(directOutput[0]?.generated_text ?? "");
     };
 
-    const output = await generator(buildPrompt(prompt, history), {
+    const output = await generator(buildPrompt(normalizedPrompt, history), {
       max_new_tokens: 256,
       temperature: 0.2,
       return_full_text: false
@@ -1248,22 +1328,24 @@ export const phiLLM = async (
         markPhiDebug({
           mode: usedWeakRepair ? "model_with_fallback" : "model",
           usedWeakRepair,
-          usedSearchHeuristic: shouldUseWebSearch(prompt)
+          usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+          normalizedPrompt
         });
         return phiResponseSchema.parse({
           ...modelResult,
           intent: "conversational",
           summary: "Conversational request handled directly by Secretary Phi.",
           response: directResponse,
-          needs_web_search: shouldUseWebSearch(prompt),
-          web_search_query: shouldUseWebSearch(prompt) ? prompt : undefined,
+          needs_web_search: shouldUseWebSearch(normalizedPrompt),
+          web_search_query: shouldUseWebSearch(normalizedPrompt) ? normalizedPrompt : undefined,
           requires_approval: false
         });
       }
       markPhiDebug({
         mode: "model",
         usedWeakRepair: false,
-        usedSearchHeuristic: Boolean(modelResult.needs_web_search)
+        usedSearchHeuristic: Boolean(modelResult.needs_web_search),
+        normalizedPrompt
       });
       return modelResult;
     }
@@ -1272,22 +1354,24 @@ export const phiLLM = async (
       markPhiDebug({
         mode: "model_with_fallback",
         usedWeakRepair: true,
-        usedSearchHeuristic: shouldUseWebSearch(prompt)
+        usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+        normalizedPrompt
       });
       return phiResponseSchema.parse({
         ...deterministic,
         intent: "conversational",
         summary: "Conversational request handled directly by Secretary Phi.",
         response: generated,
-        needs_web_search: shouldUseWebSearch(prompt),
-        web_search_query: shouldUseWebSearch(prompt) ? prompt : undefined,
+        needs_web_search: shouldUseWebSearch(normalizedPrompt),
+        web_search_query: shouldUseWebSearch(normalizedPrompt) ? normalizedPrompt : undefined,
         requires_approval: false
       });
     }
     markPhiDebug({
       mode: "heuristic",
       usedWeakRepair: true,
-      usedSearchHeuristic: shouldUseWebSearch(prompt)
+      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      normalizedPrompt
     });
     return deterministic;
   } catch {
@@ -1295,7 +1379,8 @@ export const phiLLM = async (
     markPhiDebug({
       mode: "heuristic",
       usedWeakRepair: true,
-      usedSearchHeuristic: shouldUseWebSearch(prompt)
+      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      normalizedPrompt
     });
     return deterministic;
   }

@@ -163,6 +163,30 @@ const fillerPatterns = [
   /i can also format it as a checklist/i
 ];
 
+const normalizeTokens = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
+
+const inferMemoryCategory = (key: string, value: string) => {
+  const text = `${key} ${value}`.toLowerCase();
+  if (text.includes("proposal") || text.includes("writing") || text.includes("tone")) {
+    return "writing_preferences";
+  }
+  if (text.includes("goal") || text.includes("target")) {
+    return "recurring_goals";
+  }
+  if (text.includes("business") || text.includes("company") || text.includes("ajawai")) {
+    return "business_facts";
+  }
+  if (text.includes("preference") || text.includes("prefer")) {
+    return "preferences";
+  }
+  return "personal_facts";
+};
+
 const sortByDateDesc = <T>(rows: T[], readDate: (row: T) => string) => {
   return [...rows].sort((a, b) => {
     const delta = Date.parse(readDate(b)) - Date.parse(readDate(a));
@@ -749,13 +773,32 @@ export class PicoClawManager {
     if (questionTokens.length >= 2 && overlap === 0) {
       return true;
     }
+    if (/^\s*answer\s*:/i.test(normalized)) {
+      return true;
+    }
+    if (normalized.toLowerCase().startsWith(question.toLowerCase().trim())) {
+      return true;
+    }
+    if (
+      question.toLowerCase().includes("self improve") ||
+      question.toLowerCase().includes("inspire me")
+    ) {
+      if (normalized.length < 280) {
+        return true;
+      }
+      const bulletCount = (normalized.match(/\n-/g) ?? []).length;
+      if (bulletCount < 3) {
+        return true;
+      }
+    }
     return false;
   }
 
   private async ensureDirectAnswerQuality(
     question: string,
     candidate: string,
-    history: ConversationTurn[]
+    history: ConversationTurn[],
+    memoryGuidance?: string
   ) {
     const templateFallbackUsed = fillerPatterns.some((pattern) => pattern.test(candidate.trim()));
     if (!this.isLowQualityAnswer(question, candidate)) {
@@ -766,7 +809,10 @@ export class PicoClawManager {
       };
     }
 
-    const repaired = await phiDirectAnswer(question, history);
+    const repaired = await phiDirectAnswer(question, {
+      history,
+      memoryGuidance
+    });
     if (!this.isLowQualityAnswer(question, repaired)) {
       return {
         answer: repaired,
@@ -780,6 +826,80 @@ export class PicoClawManager {
       repaired: false,
       templateFallbackUsed
     };
+  }
+
+  private async getContextualMemory(userId: string, command: string) {
+    const rows = await db.memory.where("user_id").equals(userId).toArray();
+    const queryTokens = normalizeTokens(command);
+    const ranked = rows
+      .map((row) => {
+        const textTokens = normalizeTokens(`${row.key} ${row.value}`);
+        const overlap = queryTokens.filter((token) => textTokens.includes(token)).length;
+        const score = overlap * 5 + (row.category === "writing_preferences" ? 3 : 0);
+        return {
+          row,
+          score
+        };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || b.row.updated_at.localeCompare(a.row.updated_at));
+    return ranked.slice(0, 4).map((entry) => entry.row);
+  }
+
+  private buildMemoryGuidance(memories: MemoryEntry[]) {
+    if (!memories.length) {
+      return "";
+    }
+    return memories
+      .map((memory) => `- [${memory.category}] ${memory.key}: ${memory.value}`)
+      .join("\n");
+  }
+
+  private inferLearningMemory(command: string) {
+    const text = command.trim();
+    const lower = text.toLowerCase();
+    const rememberLike = /(remember that|store memory|save memory)/i.test(text);
+    if (rememberLike) {
+      return null;
+    }
+
+    const preferMatch = text.match(/(?:i\s+prefer|please\s+use)\s+(.+)$/i);
+    if (preferMatch?.[1]) {
+      const value = preferMatch[1].trim().replace(/\.$/, "");
+      if (value.length >= 3 && value.length <= 160) {
+        const key = lower.includes("proposal") || lower.includes("writing") ? "proposal_style" : "user_preference";
+        return {
+          key,
+          value,
+          category: key === "proposal_style" ? "writing_preferences" : "preferences"
+        } as const;
+      }
+    }
+
+    const goalMatch = text.match(/(?:my\s+goal\s+is|i\s+want\s+to)\s+(.+)$/i);
+    if (goalMatch?.[1]) {
+      const value = goalMatch[1].trim().replace(/\.$/, "");
+      if (value.length >= 4 && value.length <= 180) {
+        return {
+          key: "recurring_goal",
+          value,
+          category: "recurring_goals"
+        } as const;
+      }
+    }
+
+    if (
+      (lower.includes("proposal") || lower.includes("writing")) &&
+      (lower.includes("concise") || lower.includes("short") || lower.includes("brief"))
+    ) {
+      return {
+        key: "proposal_style",
+        value: "concise",
+        category: "writing_preferences"
+      } as const;
+    }
+
+    return null;
   }
 
   private isTranslationOutputValid(answer: string) {
@@ -997,6 +1117,8 @@ export class PicoClawManager {
 
     const history = await this.getConversationHistory(conversationId, 12);
     const turnNumber = history.filter((turn) => turn.role === "user").length;
+    const contextualMemory = await this.getContextualMemory(userId, command);
+    const memoryGuidance = this.buildMemoryGuidance(contextualMemory);
 
     const conversation = await db.conversations.get(conversationId);
     if (conversation && conversation.title === "New Chat") {
@@ -1022,7 +1144,7 @@ export class PicoClawManager {
       route: "direct_conversational",
       search_used: false,
       pico_used: false,
-      memory_used: false,
+      memory_used: contextualMemory.length > 0,
       fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "heuristic",
       template_fallback_used: false,
       quality_guard_triggered: false,
@@ -1219,7 +1341,13 @@ export class PicoClawManager {
             debug.memory_used = true;
             const key = safeText(phiResult.memory_key, forcedMemorySave?.key ?? "note");
             const value = safeText(phiResult.memory_value, forcedMemorySave?.value ?? command);
-            await this.remember(userId, key, value, "preference", "secretary_phi");
+            await this.remember(
+              userId,
+              key,
+              value,
+              inferMemoryCategory(key, value),
+              "secretary_phi"
+            );
             await this.addMessage({
               conversationId,
               role: "manager_pico",
@@ -1399,7 +1527,10 @@ export class PicoClawManager {
             outcome = {
               type: "informational_answer",
               ok: true,
-              summary: phiResult.response
+              summary: await phiDirectAnswer(command, {
+                history,
+                memoryGuidance
+              })
             };
             break;
           }
@@ -1416,6 +1547,11 @@ export class PicoClawManager {
             };
           }
         }
+      }
+
+      const learned = this.inferLearningMemory(command);
+      if (learned) {
+        await this.remember(userId, learned.key, learned.value, learned.category, "learning");
       }
 
       await this.remember(userId, "last_command", command, "telemetry", "system");
@@ -1455,7 +1591,12 @@ export class PicoClawManager {
       debug.route === "direct_conversational" ||
       debug.route === "search_assisted_conversational"
     ) {
-      const guarded = await this.ensureDirectAnswerQuality(command, finalResponse, history);
+      const guarded = await this.ensureDirectAnswerQuality(
+        command,
+        finalResponse,
+        history,
+        memoryGuidance
+      );
       finalResponse = guarded.answer;
       debug.quality_guard_triggered = guarded.repaired;
       debug.template_fallback_used = guarded.templateFallbackUsed;
