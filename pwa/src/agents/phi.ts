@@ -9,6 +9,11 @@ type GeneratorFn = (
   options?: Record<string, unknown>
 ) => Promise<GeneratorOutput>;
 
+export interface ConversationTurn {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export interface SearchSynthesisInput {
   question: string;
   answerHint: string;
@@ -152,6 +157,24 @@ const extractIntentText = (prompt: string, patterns: RegExp[]) => {
   return "";
 };
 
+const formatConversationContext = (history: ConversationTurn[]) => {
+  if (!history.length) {
+    return "No prior conversation context.";
+  }
+  return history
+    .slice(-8)
+    .map((turn) => {
+      if (turn.role === "user") {
+        return `User: ${turn.content}`;
+      }
+      if (turn.role === "assistant") {
+        return `Secretary: ${turn.content}`;
+      }
+      return `System: ${turn.content}`;
+    })
+    .join("\n");
+};
+
 const extractTopicFromQuestion = (prompt: string) => {
   const cleaned = prompt.trim().replace(/\?+$/, "");
   const match =
@@ -271,6 +294,100 @@ const buildChickenSoupReply = () => {
   ].join("\n");
 };
 
+const buildChocolateCakeReply = () => {
+  return [
+    "Absolutely — here is a rich, reliable chocolate cake recipe (2 x 8-inch layers):",
+    "",
+    "Ingredients:",
+    "- 2 cups (250g) all-purpose flour",
+    "- 2 cups (400g) granulated sugar",
+    "- 3/4 cup (75g) unsweetened cocoa powder",
+    "- 2 tsp baking powder",
+    "- 1 1/2 tsp baking soda",
+    "- 1 tsp fine salt",
+    "- 2 eggs",
+    "- 1 cup (240ml) milk",
+    "- 1/2 cup (120ml) neutral oil",
+    "- 2 tsp vanilla extract",
+    "- 1 cup (240ml) hot coffee or hot water",
+    "",
+    "Steps:",
+    "1) Heat oven to 350°F / 175°C. Grease and line two 8-inch pans.",
+    "2) Whisk flour, sugar, cocoa, baking powder, baking soda, and salt.",
+    "3) Add eggs, milk, oil, and vanilla. Mix until smooth.",
+    "4) Stir in hot coffee/water (batter will be thin).",
+    "5) Divide into pans and bake 30–35 minutes until a toothpick comes out clean.",
+    "6) Cool 10 minutes in pans, then fully cool on a rack before frosting.",
+    "",
+    "Quick chocolate frosting:",
+    "- Beat 1 cup (226g) butter, 3 1/2 cups powdered sugar, 1/2 cup cocoa, pinch salt, 2 tsp vanilla, and 3–5 tbsp milk.",
+    "",
+    "Tips:",
+    "- Use coffee for deeper chocolate flavor (it won’t taste like coffee).",
+    "- Chill layers 20 minutes before frosting for cleaner assembly.",
+    "- Store covered at room temp 1 day or refrigerated up to 4 days."
+  ].join("\n");
+};
+
+const buildBananaBreadReply = () => {
+  return [
+    "Great pick — here is a moist banana bread recipe (1 loaf):",
+    "",
+    "Ingredients:",
+    "- 3 very ripe bananas, mashed",
+    "- 1/2 cup (113g) melted butter",
+    "- 3/4 cup (150g) brown sugar",
+    "- 2 eggs",
+    "- 1 tsp vanilla",
+    "- 1 1/2 cups (190g) all-purpose flour",
+    "- 1 tsp baking soda",
+    "- 1/2 tsp salt",
+    "- 1 tsp cinnamon (optional)",
+    "- 1/2 cup chopped walnuts or chocolate chips (optional)",
+    "",
+    "Steps:",
+    "1) Heat oven to 350°F / 175°C. Grease a 9x5 loaf pan.",
+    "2) Mix bananas, butter, sugar, eggs, and vanilla.",
+    "3) Add flour, baking soda, salt, and cinnamon; stir just until combined.",
+    "4) Fold in nuts/chips if using.",
+    "5) Bake 50–60 minutes until center is set and a tester comes out mostly clean.",
+    "6) Cool 15 minutes in pan, then transfer to rack.",
+    "",
+    "Tips:",
+    "- Use heavily speckled bananas for best flavor.",
+    "- Do not overmix once flour is added.",
+    "- Wrap and rest overnight for even better texture."
+  ].join("\n");
+};
+
+const buildGenericRecipeReply = (dish: string) => {
+  const title = dish.replace(/\?+$/, "").trim();
+  return [
+    `Absolutely — here is a practical ${title} recipe template you can cook right away:`,
+    "",
+    "Ingredients:",
+    "- main ingredient(s)",
+    "- aromatics (onion/garlic or equivalent)",
+    "- fat (oil/butter)",
+    "- seasoning (salt/pepper/herbs/spices)",
+    "- optional texture/flavor add-ons",
+    "",
+    "Steps:",
+    "1) Prep all ingredients and preheat pan/oven.",
+    "2) Build flavor with aromatics and seasoning first.",
+    "3) Cook the main ingredient until properly done.",
+    "4) Adjust texture/liquid and taste for salt/acid.",
+    "5) Rest briefly, then serve.",
+    "",
+    "Tips:",
+    "- Keep heat moderate to avoid overcooking.",
+    "- Taste at least twice before serving.",
+    "- Add acid (lemon/vinegar) at the end to brighten flavor.",
+    "",
+    "If you want, I can now give an exact ingredient-by-ingredient version with measurements for your preferred serving size."
+  ].join("\n");
+};
+
 const buildContractExplainerReply = () => {
   return [
     "I can help explain it clearly. If you share the text, I can summarize it line by line.",
@@ -368,6 +485,14 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return buildChickenSoupReply();
   }
 
+  if (lower.includes("chocolate cake")) {
+    return buildChocolateCakeReply();
+  }
+
+  if (lower.includes("banana bread")) {
+    return buildBananaBreadReply();
+  }
+
   if (
     lower.includes("draft an email") ||
     lower.includes("write an email") ||
@@ -399,12 +524,13 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return "Absolutely. Tell me the exact result you want, and I will give you a direct plan with steps, copy-ready text, or a draft you can use immediately.";
   }
 
-  if (lower.endsWith("recipe") || lower.includes("recipe for")) {
-    return [
-      "Absolutely — here is a strong baseline recipe format you can use immediately:",
-      "ingredients with quantities, step-by-step method, optional substitutions, and storage/reheat guidance.",
-      "If you tell me the exact dish, I will generate a full chef-style version right away."
-    ].join(" ");
+  const makeMatch =
+    normalized.match(/how do i make (.+)\??$/i) ??
+    normalized.match(/how to make (.+)\??$/i) ??
+    normalized.match(/(.+)\s+recipe$/i) ??
+    normalized.match(/recipe for (.+)$/i);
+  if (makeMatch?.[1]) {
+    return buildGenericRecipeReply(makeMatch[1]);
   }
 
   if (shouldUseWebSearch(normalized)) {
@@ -413,7 +539,7 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
 
   const topic = extractTopicFromQuestion(normalized);
   return [
-    `Here is a direct answer about ${topic}.`,
+    `Answer: ${topic}.`,
     "I can also format it as a checklist or step-by-step guide if you want."
   ].join(" ");
 };
@@ -626,7 +752,7 @@ const initializeLocalPhi = async (): Promise<GeneratorFn | null> => {
   return generatorPromise;
 };
 
-const buildPrompt = (prompt: string) => {
+const buildPrompt = (prompt: string, history: ConversationTurn[]) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Return JSON only with keys:",
@@ -636,17 +762,19 @@ const buildPrompt = (prompt: string) => {
     "Do not ask for constraints unless absolutely required.",
     "Avoid filler language.",
     "If action sends email, set requires_approval true.",
+    `Conversation context:\n${formatConversationContext(history)}`,
     `User request: ${prompt}`
   ].join("\n");
 };
 
-const buildDirectAnswerPrompt = (prompt: string) => {
+const buildDirectAnswerPrompt = (prompt: string, history: ConversationTurn[]) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Answer the user directly with a complete, useful response.",
     "Be friendly and natural.",
     "Do not ask follow-up questions unless absolutely necessary.",
     "Do not use filler text.",
+    `Conversation context:\n${formatConversationContext(history)}`,
     `User request: ${prompt}`
   ].join("\n");
 };
@@ -715,7 +843,10 @@ const deterministicSearchSynthesis = (input: SearchSynthesisInput) => {
 export const getPhiRuntimeState = () => runtimeState;
 export const getLastPhiDebugMeta = () => lastPhiDebugMeta;
 
-export const phiDirectAnswer = async (prompt: string): Promise<string> => {
+export const phiDirectAnswer = async (
+  prompt: string,
+  history: ConversationTurn[] = []
+): Promise<string> => {
   const fallback = buildConciseFallbackAnswer(prompt);
   const generator = await initializeLocalPhi();
   if (!generator) {
@@ -723,7 +854,7 @@ export const phiDirectAnswer = async (prompt: string): Promise<string> => {
   }
 
   try {
-    const output = await generator(buildDirectAnswerPrompt(prompt), {
+    const output = await generator(buildDirectAnswerPrompt(prompt, history), {
       max_new_tokens: 420,
       temperature: 0.4,
       return_full_text: false
@@ -761,7 +892,10 @@ export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Pr
   }
 };
 
-export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
+export const phiLLM = async (
+  prompt: string,
+  history: ConversationTurn[] = []
+): Promise<PhiResponse> => {
   const deterministic = heuristicPhi(prompt);
   if (deterministic.intent !== "conversational") {
     markPhiDebug({
@@ -784,7 +918,7 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
 
   try {
     const generateDirectAnswer = async () => {
-      const directOutput = await generator(buildDirectAnswerPrompt(prompt), {
+      const directOutput = await generator(buildDirectAnswerPrompt(prompt, history), {
         max_new_tokens: 420,
         temperature: 0.45,
         return_full_text: false
@@ -792,7 +926,7 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
       return sanitizeModelAnswer(directOutput[0]?.generated_text ?? "");
     };
 
-    const output = await generator(buildPrompt(prompt), {
+    const output = await generator(buildPrompt(prompt, history), {
       max_new_tokens: 256,
       temperature: 0.2,
       return_full_text: false

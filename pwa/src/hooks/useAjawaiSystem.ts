@@ -229,12 +229,14 @@ export const useAjawaiSystem = (session: Session) => {
         const message =
           error instanceof Error ? error.message : "Request failed. Please retry your message.";
         const errorTrace: CommandDebugInfo = {
+          turn_number: 0,
           intent: "error",
           route: "direct_conversational",
           search_used: false,
           pico_used: false,
           memory_used: false,
           fallback_triggered: false,
+          template_fallback_used: false,
           quality_guard_triggered: false,
           at: new Date().toISOString()
         };
