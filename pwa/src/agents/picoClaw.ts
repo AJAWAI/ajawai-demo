@@ -56,6 +56,22 @@ export interface ActionResult {
   connectUrl?: string | null;
 }
 
+type SecretaryResponseType =
+  | "informational_answer"
+  | "action_completed"
+  | "task_created"
+  | "project_created"
+  | "memory_saved"
+  | "approval_required"
+  | "error_failure";
+
+interface CommandOutcome {
+  type: SecretaryResponseType;
+  ok: boolean;
+  summary: string;
+  details?: Record<string, unknown>;
+}
+
 export interface Module3Snapshot {
   profiles: Profile[];
   projects: Project[];
@@ -107,6 +123,16 @@ const parseContactPayload = (approval: Approval): ContactSubcontractorApprovalPa
 
 const safeText = (value: string | undefined, fallback: string) => {
   return value && value.trim().length > 0 ? value.trim() : fallback;
+};
+
+const isStatusRequest = (command: string) => {
+  const normalized = command.toLowerCase();
+  return (
+    normalized.includes("system status") ||
+    normalized.includes("confirm the system is running") ||
+    normalized.includes("show current system status") ||
+    normalized.includes("status")
+  );
 };
 
 export class PicoClawManager {
@@ -196,6 +222,70 @@ export class PicoClawManager {
       last_message_at: nowIso()
     });
     this.invalidateSnapshot();
+  }
+
+  private async addSecretaryFinalMessage(
+    conversationId: string,
+    type: SecretaryResponseType,
+    content: string,
+    payload?: Record<string, unknown>
+  ) {
+    await this.addMessage({
+      conversationId,
+      role: "secretary_phi",
+      type,
+      content,
+      payload
+    });
+  }
+
+  private buildSecretaryFinalResponse(outcome: CommandOutcome): string {
+    switch (outcome.type) {
+      case "informational_answer":
+        return outcome.summary;
+      case "project_created":
+        return `${SECRETARY_NAME}: Project created successfully. ${outcome.summary}`;
+      case "task_created":
+        return `${SECRETARY_NAME}: Task created and ready. ${outcome.summary}`;
+      case "memory_saved":
+        return `${SECRETARY_NAME}: Memory has been saved locally. ${outcome.summary}`;
+      case "approval_required":
+        return `${SECRETARY_NAME}: ${outcome.summary} The action is queued and awaiting your approval.`;
+      case "error_failure":
+        return `${SECRETARY_NAME}: ${outcome.summary}`;
+      case "action_completed":
+      default:
+        return `${SECRETARY_NAME}: ${outcome.summary}`;
+    }
+  }
+
+  private async getSystemStatusSummary(userId: string) {
+    const gmail = await this.getGmailStatus();
+    const memoryCount = await db.memory.count();
+    const profile = await db.profiles.where("user_id").equals(userId).first();
+    const modules = [
+      "Secretary Phi",
+      "Manager Pico Claw",
+      "Projects",
+      "Tasks",
+      "Notes",
+      "Contacts",
+      "Approvals",
+      "Timeline",
+      "Memory"
+    ];
+    const online = navigator.onLine ? "online" : "offline";
+    const picoState = "active";
+    const memoryState = memoryCount > 0 ? `available (${memoryCount} entries)` : "available (empty)";
+    const userLabel = profile?.full_name || "President";
+    return [
+      `System is ${online}.`,
+      `Logged in user: ${userLabel} (${userId}).`,
+      `Available modules: ${modules.join(", ")}.`,
+      `Gmail: ${gmail.connected ? "connected" : "not connected"} (${gmail.mode}).`,
+      `Local memory: ${memoryState}.`,
+      `Pico Claw: ${picoState}.`
+    ].join(" ");
   }
 
   private async getActiveConversationId() {
@@ -423,6 +513,11 @@ export class PicoClawManager {
     const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
     if (!approval || approval.status !== "pending") {
+      await this.addSecretaryFinalMessage(
+        resolvedConversationId,
+        "error_failure",
+        "I reviewed that approval, but it is no longer pending."
+      );
       return {
         ok: false,
         kind: "gmail_send_failed",
@@ -448,6 +543,11 @@ export class PicoClawManager {
           "Approval blocked: Gmail is not connected.",
           null
         );
+        await this.addSecretaryFinalMessage(
+          resolvedConversationId,
+          "approval_required",
+          "Gmail is not connected yet. Please connect Gmail, then approve again."
+        );
         return {
           ok: false,
           kind: "gmail_not_connected",
@@ -470,6 +570,11 @@ export class PicoClawManager {
           content: `Email send failed: ${error instanceof Error ? error.message : "unknown error"}`
         });
         await this.logTimeline("email_send_failed", "Email send failed after approval attempt.", null);
+        await this.addSecretaryFinalMessage(
+          resolvedConversationId,
+          "error_failure",
+          "I tried to send the email, but it failed. Please retry after checking the relay/Gmail status."
+        );
         return {
           ok: false,
           kind: "gmail_send_failed",
@@ -502,6 +607,11 @@ export class PicoClawManager {
       });
       await this.logTimeline("approval_granted", `Approval granted: ${approval.action_type}`, null);
       this.invalidateSnapshot();
+      await this.addSecretaryFinalMessage(
+        resolvedConversationId,
+        "action_completed",
+        "Approval completed and email sent successfully."
+      );
       return {
         ok: true,
         kind: "gmail_send_success",
@@ -542,6 +652,11 @@ export class PicoClawManager {
       content: `${MANAGER_NAME} executed approved action: ${approval.action_type}.`
     });
     this.invalidateSnapshot();
+    await this.addSecretaryFinalMessage(
+      resolvedConversationId,
+      "action_completed",
+      `Approval completed for ${approval.action_type}.`
+    );
     return {
       ok: true,
       kind: "approved",
@@ -553,6 +668,11 @@ export class PicoClawManager {
     const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
     if (!approval || approval.status !== "pending") {
+      await this.addSecretaryFinalMessage(
+        resolvedConversationId,
+        "error_failure",
+        "I checked that approval, but it is no longer pending."
+      );
       return {
         ok: false,
         kind: "rejected",
@@ -570,6 +690,11 @@ export class PicoClawManager {
       content: `${MANAGER_NAME} rejected action: ${approval.action_type}.`
     });
     this.invalidateSnapshot();
+    await this.addSecretaryFinalMessage(
+      resolvedConversationId,
+      "action_completed",
+      `I rejected ${approval.action_type} as requested.`
+    );
     return {
       ok: true,
       kind: "rejected",
@@ -601,203 +726,307 @@ export class PicoClawManager {
       content: phiResult.response
     });
 
-    switch (phiResult.intent) {
-      case "create_project": {
-        const projectName = safeText(phiResult.project_name, "Untitled Project");
-        const project = await this.createProject(userId, projectName, phiResult.summary);
-        await this.addMessage({
-          conversationId,
-          role: "manager_pico",
-          type: "project_created_card",
-          content: "Project created.",
-          payload: {
-            id: project.id,
-            name: project.name,
-            status: project.status
-          }
-        });
-        break;
-      }
-      case "create_task": {
-        const taskTitle = safeText(phiResult.task_title, "New Task");
-        if (phiResult.requires_approval) {
-          const approval = await this.createApproval("create_task", {
-            title: taskTitle,
-            description: phiResult.summary
-          });
-          await this.logTimeline(
-            "approval_requested",
-            `Task "${taskTitle}" queued for approval.`,
-            null
-          );
-          await this.addMessage({
-            conversationId,
-            role: "manager_pico",
-            type: "approval_request_card",
-            content: "Approval required before creating this task.",
-            payload: {
-              approval_id: approval.id,
-              action_type: approval.action_type
-            }
-          });
-        } else {
-          const task = await this.createTask({
-            title: taskTitle,
-            description: phiResult.summary
-          });
-          await this.addMessage({
-            conversationId,
-            role: "manager_pico",
-            type: "task_created_card",
-            content: "Task created.",
-            payload: {
-              id: task.id,
-              title: task.title,
-              status: task.status
-            }
-          });
-        }
-        break;
-      }
-      case "create_contact": {
-        const contactName = safeText(phiResult.contact_name, "New Contact");
-        const contactEmail = safeText(phiResult.contact_email, "contact@example.com");
-        if (phiResult.requires_approval) {
-          const approval = await this.createApproval("contact_subcontractor", {
-            name: contactName,
-            email: contactEmail
-          });
-          await this.logTimeline(
-            "approval_requested",
-            `Contact "${contactName}" queued for approval.`,
-            null
-          );
-          await this.addMessage({
-            conversationId,
-            role: "manager_pico",
-            type: "approval_request_card",
-            content: "Approval required before contacting subcontractor.",
-            payload: {
-              approval_id: approval.id,
-              action_type: approval.action_type
-            }
-          });
-        } else {
-          const contact = await this.createContact(contactName, contactEmail);
-          await this.addMessage({
-            conversationId,
-            role: "manager_pico",
-            type: "system_notice",
-            content: `Contact created: ${contact.name}`
-          });
-        }
-        break;
-      }
-      case "create_note": {
-        const note = await this.createNote(
-          userId,
-          safeText(phiResult.note_title, "President Note"),
-          safeText(phiResult.note_content, command),
-          null
-        );
-        await this.addMessage({
-          conversationId,
-          role: "manager_pico",
-          type: "note_saved_card",
-          content: "Note saved.",
-          payload: {
-            id: note.id,
-            title: note.title
-          }
-        });
-        break;
-      }
-      case "search_memory": {
-        const query = safeText(phiResult.memory_query, command);
-        const matches = await this.searchMemory(query);
-        const summary = matches.length
-          ? `Found ${matches.length} memory item(s) for "${query}".`
-          : `No memory matches for "${query}" yet.`;
-        await this.addMessage({
-          conversationId,
-          role: "secretary_phi",
-          type: "assistant",
-          content: summary
-        });
-        await this.logTimeline("memory_search", summary, null);
-        break;
-      }
-      case "send_email": {
-        const to = phiResult.email_to ?? [];
-        let subject = phiResult.email_subject;
-        let body = phiResult.email_body;
-        if (!subject || !body) {
-          const draft = await phiLLM(
-            `Draft a short executive email for this request. Request: ${command}`
-          );
-          subject = subject ?? draft.email_subject ?? "AJAWAI Request";
-          body =
-            body ??
-            draft.email_body ??
-            "Hello, this is a message from AJAWAI. Please reply with your availability.";
-        }
+    let outcome: CommandOutcome = {
+      type: "action_completed",
+      ok: true,
+      summary: "Pico Claw organized next steps."
+    };
 
-        const task = await this.createTask({
-          title: safeText(phiResult.task_title, "Send approval-controlled email"),
-          description: `Draft prepared by ${SECRETARY_NAME}.`,
-          requires_approval: true,
-          priority: "high"
-        });
-
-        const approval = await this.createApproval("send_email", {
-          to: to.length > 0 ? to : ["recipient@example.com"],
-          subject,
-          body,
-          task_id: task.id
-        });
-
-        await this.logTimeline("email_drafted", "Secretary drafted email and queued approval.", null);
-        await this.addMessage({
-          conversationId,
-          role: "manager_pico",
-          type: "approval_request_card",
-          content: "Email queued. Approval required before sending.",
-          payload: {
-            approval_id: approval.id,
-            to: to.length > 0 ? to : ["recipient@example.com"],
-            subject
-          }
-        });
+    try {
+      if (isStatusRequest(command)) {
+        const statusSummary = await this.getSystemStatusSummary(userId);
+        await this.logTimeline("status_checked", "System status requested by President.", null);
         await this.addMessage({
           conversationId,
           role: "manager_pico",
           type: "system_notice",
-          content: `${MANAGER_NAME} organized next steps and queued email for approval.`
+          content: `${MANAGER_NAME} gathered current system status for Secretary Phi.`
         });
-        break;
+        outcome = {
+          type: "informational_answer",
+          ok: true,
+          summary: statusSummary
+        };
+      } else {
+        switch (phiResult.intent) {
+          case "create_project": {
+            const projectName = safeText(phiResult.project_name, "Untitled Project");
+            const project = await this.createProject(userId, projectName, phiResult.summary);
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "project_created_card",
+              content: "Project created.",
+              payload: {
+                id: project.id,
+                name: project.name,
+                status: project.status
+              }
+            });
+            outcome = {
+              type: "project_created",
+              ok: true,
+              summary: `Created project "${project.name}" with status ${project.status}.`,
+              details: { projectId: project.id }
+            };
+            break;
+          }
+          case "create_task": {
+            const taskTitle = safeText(phiResult.task_title, "New Task");
+            if (phiResult.requires_approval) {
+              const approval = await this.createApproval("create_task", {
+                title: taskTitle,
+                description: phiResult.summary
+              });
+              await this.logTimeline(
+                "approval_requested",
+                `Task "${taskTitle}" queued for approval.`,
+                null
+              );
+              await this.addMessage({
+                conversationId,
+                role: "manager_pico",
+                type: "approval_request_card",
+                content: "Approval required before creating this task.",
+                payload: {
+                  approval_id: approval.id,
+                  action_type: approval.action_type
+                }
+              });
+              outcome = {
+                type: "approval_required",
+                ok: true,
+                summary: `Task "${taskTitle}" is queued for approval.`,
+                details: { approvalId: approval.id }
+              };
+            } else {
+              const task = await this.createTask({
+                title: taskTitle,
+                description: phiResult.summary
+              });
+              await this.addMessage({
+                conversationId,
+                role: "manager_pico",
+                type: "task_created_card",
+                content: "Task created.",
+                payload: {
+                  id: task.id,
+                  title: task.title,
+                  status: task.status
+                }
+              });
+              outcome = {
+                type: "task_created",
+                ok: true,
+                summary: `Created task "${task.title}" with status ${task.status}.`,
+                details: { taskId: task.id }
+              };
+            }
+            break;
+          }
+          case "create_contact": {
+            const contactName = safeText(phiResult.contact_name, "New Contact");
+            const contactEmail = safeText(phiResult.contact_email, "contact@example.com");
+            if (phiResult.requires_approval) {
+              const approval = await this.createApproval("contact_subcontractor", {
+                name: contactName,
+                email: contactEmail
+              });
+              await this.logTimeline(
+                "approval_requested",
+                `Contact "${contactName}" queued for approval.`,
+                null
+              );
+              await this.addMessage({
+                conversationId,
+                role: "manager_pico",
+                type: "approval_request_card",
+                content: "Approval required before contacting subcontractor.",
+                payload: {
+                  approval_id: approval.id,
+                  action_type: approval.action_type
+                }
+              });
+              outcome = {
+                type: "approval_required",
+                ok: true,
+                summary: `Contact outreach for "${contactName}" is queued for approval.`,
+                details: { approvalId: approval.id }
+              };
+            } else {
+              const contact = await this.createContact(contactName, contactEmail);
+              await this.addMessage({
+                conversationId,
+                role: "manager_pico",
+                type: "system_notice",
+                content: `Contact created: ${contact.name}`
+              });
+              outcome = {
+                type: "action_completed",
+                ok: true,
+                summary: `Contact "${contact.name}" has been saved.`
+              };
+            }
+            break;
+          }
+          case "create_note": {
+            const note = await this.createNote(
+              userId,
+              safeText(phiResult.note_title, "President Note"),
+              safeText(phiResult.note_content, command),
+              null
+            );
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "note_saved_card",
+              content: "Note saved.",
+              payload: {
+                id: note.id,
+                title: note.title
+              }
+            });
+            outcome = {
+              type: "action_completed",
+              ok: true,
+              summary: `Saved note "${note.title}".`
+            };
+            break;
+          }
+          case "search_memory": {
+            const query = safeText(phiResult.memory_query, command);
+            const matches = await this.searchMemory(query);
+            const summary = matches.length
+              ? `Found ${matches.length} memory item(s) for "${query}".`
+              : `No memory matches for "${query}" yet.`;
+            await this.logTimeline("memory_search", summary, null);
+            outcome = {
+              type: "informational_answer",
+              ok: true,
+              summary
+            };
+            break;
+          }
+          case "send_email": {
+            const to = phiResult.email_to ?? [];
+            let subject = phiResult.email_subject;
+            let body = phiResult.email_body;
+            if (!subject || !body) {
+              const draft = await phiLLM(
+                `Draft a short executive email for this request. Request: ${command}`
+              );
+              subject = subject ?? draft.email_subject ?? "AJAWAI Request";
+              body =
+                body ??
+                draft.email_body ??
+                "Hello, this is a message from AJAWAI. Please reply with your availability.";
+            }
+
+            const task = await this.createTask({
+              title: safeText(phiResult.task_title, "Send approval-controlled email"),
+              description: `Draft prepared by ${SECRETARY_NAME}.`,
+              requires_approval: true,
+              priority: "high"
+            });
+
+            const approval = await this.createApproval("send_email", {
+              to: to.length > 0 ? to : ["recipient@example.com"],
+              subject,
+              body,
+              task_id: task.id
+            });
+
+            await this.logTimeline(
+              "email_drafted",
+              "Secretary drafted email and queued approval.",
+              null
+            );
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "approval_request_card",
+              content: "Email queued. Approval required before sending.",
+              payload: {
+                approval_id: approval.id,
+                to: to.length > 0 ? to : ["recipient@example.com"],
+                subject
+              }
+            });
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "system_notice",
+              content: `${MANAGER_NAME} organized next steps and queued email for approval.`
+            });
+            outcome = {
+              type: "approval_required",
+              ok: true,
+              summary: "Email draft is ready and queued for approval.",
+              details: { approvalId: approval.id, taskId: task.id }
+            };
+            break;
+          }
+          default: {
+            await this.logTimeline("command_interpreted", phiResult.summary, null);
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "system_notice",
+              content: `${MANAGER_NAME} organized next steps.`
+            });
+            outcome = {
+              type: "action_completed",
+              ok: true,
+              summary:
+                "I reviewed the request and organized next steps. Tell me what output you want next."
+            };
+          }
+        }
       }
-      default: {
-        await this.logTimeline("command_interpreted", phiResult.summary, null);
+
+      await this.remember("last_command", command);
+      if (command.toLowerCase().includes("remember")) {
         await this.addMessage({
           conversationId,
           role: "manager_pico",
-          type: "system_notice",
-          content: `${MANAGER_NAME} organized next steps.`
+          type: "memory_saved_card",
+          content: "Memory saved locally."
         });
+        outcome = {
+          type: "memory_saved",
+          ok: true,
+          summary: "Your memory instruction was stored locally."
+        };
       }
-    }
-
-    await this.remember("last_command", command);
-    if (command.toLowerCase().includes("remember")) {
+    } catch (error) {
+      outcome = {
+        type: "error_failure",
+        ok: false,
+        summary:
+          error instanceof Error
+            ? error.message
+            : "I reviewed the request, but I need more information."
+      };
       await this.addMessage({
         conversationId,
         role: "manager_pico",
-        type: "memory_saved_card",
-        content: "Memory saved locally."
+        type: "system_notice",
+        content: `${MANAGER_NAME} encountered an execution issue.`
       });
+      await this.logTimeline(
+        "execution_error",
+        `Execution failure: ${outcome.summary}`,
+        null
+      );
     }
+
+    const finalResponse = this.buildSecretaryFinalResponse(outcome);
+    await this.addSecretaryFinalMessage(conversationId, outcome.type, finalResponse, outcome.details);
     this.invalidateSnapshot();
-    return phiResult;
+    return {
+      ...phiResult,
+      response: finalResponse
+    };
   }
 
   async createProjectFromForm(userId: string, name: string, description: string) {

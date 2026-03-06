@@ -84,6 +84,26 @@ export default function Dashboard({ session }: DashboardProps) {
         </article>
       );
     }
+
+    if (
+      message.role === "secretary_phi" &&
+      [
+        "informational_answer",
+        "action_completed",
+        "task_created",
+        "project_created",
+        "memory_saved",
+        "approval_required",
+        "error_failure"
+      ].includes(message.type)
+    ) {
+      return (
+        <article className={`chat-card secretary ${message.type}`} key={message.id}>
+          <strong>{SECRETARY_NAME}</strong>
+          <p>{message.content}</p>
+        </article>
+      );
+    }
     if (message.type === "user") {
       return (
         <article className="chat-message user" key={message.id}>
@@ -118,6 +138,15 @@ export default function Dashboard({ session }: DashboardProps) {
               </button>
             </div>
           )}
+        </article>
+      );
+    }
+
+    if (message.type === "system_notice") {
+      return (
+        <article className="chat-card system" key={message.id}>
+          <strong>{MANAGER_NAME}</strong>
+          <p>{message.content}</p>
         </article>
       );
     }

@@ -331,6 +331,24 @@ body {
   border-color: #1ca7a8;
 }
 
+.chat-card.system {
+  border-color: #5b6f99;
+  background: #131b2f;
+}
+
+.chat-card.secretary {
+  border-color: #d4af37;
+  background: #171f33;
+}
+
+.chat-card.secretary.error_failure {
+  border-color: #f87171;
+}
+
+.chat-card.secretary.approval_required {
+  border-color: #d4af37;
+}
+
 .chat-composer {
   position: sticky;
   bottom: 0.6rem;
