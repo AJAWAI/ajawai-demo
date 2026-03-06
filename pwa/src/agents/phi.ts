@@ -9,6 +9,19 @@ type GeneratorFn = (
   options?: Record<string, unknown>
 ) => Promise<GeneratorOutput>;
 
+export interface SearchSynthesisInput {
+  question: string;
+  answerHint: string;
+  keyFacts: string[];
+  sources: Array<{
+    title: string;
+    snippet: string;
+    source: string;
+    score?: number;
+  }>;
+  warnings: string[];
+}
+
 const now = () => new Date().toISOString();
 
 let generatorPromise: Promise<GeneratorFn | null> | null = null;
@@ -87,6 +100,17 @@ const looksLikeWeakReply = (reply: string) => {
     lower.includes("can you provide more details") ||
     lower.includes("i need more information to proceed") ||
     lower.includes("start by defining the exact outcome")
+  );
+};
+
+const looksLikeWeakSynthesis = (reply: string) => {
+  const lower = reply.toLowerCase();
+  return (
+    looksLikeWeakReply(reply) ||
+    lower.includes("based on the provided sources") ||
+    lower.includes("according to the snippets") ||
+    lower.includes("the sources indicate") ||
+    reply.trim().length < 40
   );
 };
 
@@ -315,11 +339,7 @@ const buildInvoiceFactoringReply = () => {
 
 const buildFactualFallback = (prompt: string) => {
   const topic = extractTopicFromQuestion(prompt);
-  return [
-    `Here is a direct answer about ${topic}:`,
-    `${topic} depends on context and current facts. I can give the best answer by checking live sources and summarizing them clearly.`,
-    "I will provide the answer first, then concise supporting sources."
-  ].join("\n");
+  return `I’m checking live sources for ${topic} and will provide a clear answer first, followed by concise supporting references.`;
 };
 
 const buildFriendlyConversationalReply = (prompt: string): string => {
@@ -377,7 +397,7 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return buildFactualFallback(normalized);
   }
 
-  return "I’m on it. Here is a clear answer: focus on the outcome, use concrete steps, and execute in order. If you want, I can tailor this to your exact context right now.";
+  return `Here is a direct answer: ${normalized}. If you want, I can also provide a concise step-by-step version.`;
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
@@ -613,7 +633,76 @@ const buildDirectAnswerPrompt = (prompt: string) => {
   ].join("\n");
 };
 
+const buildSearchSynthesisPrompt = (input: SearchSynthesisInput) => {
+  const compactSources = input.sources
+    .slice(0, 4)
+    .map((source, index) => {
+      return `${index + 1}) ${source.title} [${source.source}]${source.score ? ` (score ${source.score})` : ""}: ${source.snippet}`;
+    })
+    .join("\n");
+  const compactFacts = input.keyFacts
+    .slice(0, 4)
+    .map((fact, index) => `${index + 1}) ${fact}`)
+    .join("\n");
+
+  return [
+    "You are Secretary Phi in AJAWAI.",
+    "Write a polished answer for the user.",
+    "Rules:",
+    "- Start with a direct answer in 1-2 sentences.",
+    "- Then give a short context paragraph.",
+    "- Then include a brief 'Key facts:' bullet list when useful (max 4 bullets).",
+    "- Do not mention snippets, sources processing, or internal pipeline.",
+    "- Do not hedge excessively.",
+    "- Keep it concise but useful.",
+    `Question: ${input.question}`,
+    `Answer hint: ${input.answerHint || "N/A"}`,
+    `Cross-referenced key facts:\n${compactFacts || "N/A"}`,
+    `Top sources:\n${compactSources || "N/A"}`,
+    `Warnings: ${input.warnings.join(" | ") || "none"}`
+  ].join("\n");
+};
+
+const deterministicSearchSynthesis = (input: SearchSynthesisInput) => {
+  const direct = input.answerHint || input.keyFacts[0] || input.sources[0]?.snippet || "I could not verify a reliable answer yet.";
+  const contextLine = input.keyFacts[1] || input.sources[1]?.snippet || "";
+  const keyFacts = input.keyFacts.length > 0 ? input.keyFacts.slice(0, 4) : input.sources.slice(0, 3).map((source) => source.snippet);
+
+  const sections = [
+    direct,
+    contextLine ? `\n${contextLine}` : "",
+    keyFacts.length > 0
+      ? `\nKey facts:\n${keyFacts.map((fact) => `- ${fact}`).join("\n")}`
+      : ""
+  ].join("\n");
+
+  return sanitizeModelAnswer(sections).trim();
+};
+
 export const getPhiRuntimeState = () => runtimeState;
+
+export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Promise<string> => {
+  const fallback = deterministicSearchSynthesis(input);
+  const generator = await initializeLocalPhi();
+  if (!generator) {
+    return fallback;
+  }
+
+  try {
+    const output = await generator(buildSearchSynthesisPrompt(input), {
+      max_new_tokens: 380,
+      temperature: 0.35,
+      return_full_text: false
+    });
+    const text = sanitizeModelAnswer(output[0]?.generated_text ?? "");
+    if (looksLikeWeakSynthesis(text)) {
+      return fallback;
+    }
+    return text;
+  } catch {
+    return fallback;
+  }
+};
 
 export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
   const deterministic = heuristicPhi(prompt);

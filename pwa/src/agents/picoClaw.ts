@@ -16,7 +16,7 @@ import {
 } from "../storage/db";
 import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
-import { phiLLM } from "./phi";
+import { phiLLM, phiSynthesizeSearchAnswer } from "./phi";
 import { runPublicWebSearch, type PublicWebSearchResult } from "../search/publicWebSearch";
 
 const relayBaseUrl =
@@ -644,30 +644,31 @@ export class PicoClawManager {
     }
   }
 
-  private buildWebSearchSecretaryAnswer(
+  private async buildWebSearchSecretaryAnswer(
     question: string,
     fallbackAnswer: string,
     payload: PublicWebSearchResult
   ) {
-    const sources = (payload.sources ?? []).slice(0, 6);
+    const sources = (payload.sources ?? []).slice(0, 4);
     const images = (payload.images ?? []).slice(0, 4);
-    const firstFact =
-      cleanSnippet(payload.answer_hint ?? "") ||
-      cleanSnippet(sources[0]?.snippet ?? "") ||
-      cleanSnippet(fallbackAnswer);
-    const supportBullets = sources
-      .slice(0, 3)
-      .map((source, index) => `${index + 1}. ${source.title}: ${cleanSnippet(source.snippet)}`)
-      .join("\n");
     const warnings = (payload.warnings ?? []).filter((warning) => warning.trim().length > 0);
 
+    const synthesized = await phiSynthesizeSearchAnswer({
+      question,
+      answerHint: cleanSnippet(payload.answer_hint ?? "") || cleanSnippet(fallbackAnswer),
+      keyFacts: (payload.key_facts ?? []).map((fact) => cleanSnippet(fact)).filter(Boolean),
+      sources: sources.map((source) => ({
+        ...source,
+        snippet: cleanSnippet(source.snippet)
+      })),
+      warnings
+    });
+
     const response = [
-      firstFact || `Here is what I found for "${question}".`,
-      supportBullets ? `\nKey context:\n${supportBullets}` : "",
+      synthesized,
       warnings.length > 0
-        ? `\nNote: Some live sources were unavailable (${warnings.join(" | ")}).`
-        : "",
-      sources.length > 0 ? "\nI included source links below." : ""
+        ? `\nNote: live retrieval had partial issues (${warnings.join(" | ")}), so verify critical facts in the source links below.`
+        : ""
     ]
       .join("\n")
       .trim();
@@ -1203,7 +1204,7 @@ export class PicoClawManager {
               const searchQuery = safeText(phiResult.web_search_query, command);
               const webResult = await this.searchWeb(searchQuery);
               if (webResult.ok) {
-                const { response, details } = this.buildWebSearchSecretaryAnswer(
+                const { response, details } = await this.buildWebSearchSecretaryAnswer(
                   command,
                   phiResult.response,
                   webResult.data
