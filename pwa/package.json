@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@ajawai/shared": "1.0.0",
+    "@supabase/supabase-js": "^2.98.0",
     "dexie": "^4.2.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.13.1"
   },
   "devDependencies": {
     "@types/react": "^19.1.12",
