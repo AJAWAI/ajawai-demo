@@ -1,6 +1,5 @@
 import { type FormEvent, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import type { Task } from "@ajawai/shared";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import { useAjawaiSystem } from "../hooks/useAjawaiSystem";
 
@@ -10,20 +9,18 @@ interface DashboardProps {
 
 export default function Dashboard({ session }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<
-    "Home" | "Projects" | "Tasks" | "Notes" | "Contacts" | "Agents" | "Settings"
-  >("Home");
+    | "Chat"
+    | "History"
+    | "Projects"
+    | "Tasks"
+    | "Notes"
+    | "Contacts"
+    | "Agents"
+    | "Approvals"
+    | "Settings"
+  >("Chat");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [command, setCommand] = useState("");
-  const [projectName, setProjectName] = useState("");
-  const [projectDescription, setProjectDescription] = useState("");
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskDescription, setTaskDescription] = useState("");
-  const [taskPriority, setTaskPriority] = useState<Task["priority"]>("medium");
-  const [noteTitle, setNoteTitle] = useState("");
-  const [noteContent, setNoteContent] = useState("");
-  const [contactName, setContactName] = useState("");
-  const [contactEmail, setContactEmail] = useState("");
-  const [contactCompany, setContactCompany] = useState("");
-  const [contactPhone, setContactPhone] = useState("");
 
   const {
     user,
@@ -32,13 +29,18 @@ export default function Dashboard({ session }: DashboardProps) {
     syncState,
     gmailStatus,
     phiStatus,
+    toast,
+    activeConversationId,
+    activeConversationMessages,
     runCommand,
     approve,
     reject,
-    setTaskStatus,
     syncNow,
     refreshGmailStatus,
     connectGmail,
+    createConversation,
+    selectConversation,
+    clearToast,
     logout
   } = useAjawaiSystem(session);
 
@@ -48,77 +50,147 @@ export default function Dashboard({ session }: DashboardProps) {
   );
 
   const recentProjects = useMemo(() => snapshot.projects.slice(0, 3), [snapshot.projects]);
-  const recentNotes = useMemo(() => snapshot.notes.slice(0, 3), [snapshot.notes]);
-  const openTasks = useMemo(
-    () => snapshot.tasks.filter((task) => task.status !== "done").slice(0, 5),
-    [snapshot.tasks]
-  );
-  const recentTimeline = useMemo(() => snapshot.timeline.slice(0, 8), [snapshot.timeline]);
-  const recentMessages = useMemo(() => snapshot.messages.slice(0, 12), [snapshot.messages]);
+  const approvalConversationId = activeConversationId ?? snapshot.conversations[0]?.id ?? "";
 
   const submitCommand = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!command.trim()) {
+    if (!command.trim() || !activeConversationId) {
       return;
     }
-    await runCommand(command);
+    await runCommand(command, activeConversationId);
     setCommand("");
   };
 
-  const submitProject = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!projectName.trim()) {
-      return;
+  const startNewChat = async () => {
+    const conversationId = await createConversation();
+    if (conversationId) {
+      setActiveTab("Chat");
+      setSidebarOpen(false);
     }
-    await runCommand(
-      `Create project "${projectName.trim()}". Description: ${projectDescription.trim()}`
-    );
-    setProjectName("");
-    setProjectDescription("");
   };
 
-  const submitTask = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!taskTitle.trim()) {
-      return;
-    }
-    await runCommand(
-      `Create task "${taskTitle.trim()}" with ${taskPriority} priority. Details: ${taskDescription.trim()}`
-    );
-    setTaskTitle("");
-    setTaskDescription("");
-    setTaskPriority("medium");
+  const selectChat = async (conversationId: string) => {
+    await selectConversation(conversationId);
+    setActiveTab("Chat");
+    setSidebarOpen(false);
   };
 
-  const submitNote = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!noteTitle.trim() || !noteContent.trim()) {
-      return;
+  const renderMessageCard = (message: (typeof activeConversationMessages)[number]) => {
+    if (message.type === "assistant") {
+      return (
+        <article className="chat-message assistant" key={message.id}>
+          <span className="chat-role">{SECRETARY_NAME}</span>
+          <p>{message.content}</p>
+        </article>
+      );
     }
-    await runCommand(
-      `Create note titled "${noteTitle.trim()}". Content: ${noteContent.trim()}`
-    );
-    setNoteTitle("");
-    setNoteContent("");
-  };
+    if (message.type === "user") {
+      return (
+        <article className="chat-message user" key={message.id}>
+          <span className="chat-role">President</span>
+          <p>{message.content}</p>
+        </article>
+      );
+    }
 
-  const submitContact = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!contactName.trim() || !contactEmail.trim()) {
-      return;
+    if (message.type === "approval_request_card") {
+      const approvalId =
+        typeof message.payload?.approval_id === "string" ? message.payload.approval_id : null;
+      return (
+        <article className="chat-card approval" key={message.id}>
+          <strong>Approval required</strong>
+          <p>{message.content}</p>
+          {approvalId && (
+            <div className="os-row">
+              <button
+                className="os-button teal"
+                type="button"
+                onClick={() => void approve(approvalId, approvalConversationId)}
+              >
+                Approve
+              </button>
+              <button
+                className="os-button ghost"
+                type="button"
+                onClick={() => void reject(approvalId, approvalConversationId)}
+              >
+                Reject
+              </button>
+            </div>
+          )}
+        </article>
+      );
     }
-    await runCommand(
-      `Create contact ${contactName.trim()} with email ${contactEmail.trim()} and company ${contactCompany.trim()} phone ${contactPhone.trim()}`
+
+    return (
+      <article className="chat-card result" key={message.id}>
+        <strong>{message.type.replaceAll("_", " ")}</strong>
+        <p>{message.content}</p>
+      </article>
     );
-    setContactName("");
-    setContactEmail("");
-    setContactCompany("");
-    setContactPhone("");
   };
 
   return (
     <main className="os-shell">
+      <aside className={`sidebar-overlay ${sidebarOpen ? "open" : ""}`}>
+        <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+        <div className="sidebar-panel">
+          <button className="os-button gold" type="button" onClick={() => void startNewChat()}>
+            New Chat
+          </button>
+          <nav className="sidebar-nav">
+            {(
+              [
+                "Chat",
+                "History",
+                "Projects",
+                "Tasks",
+                "Notes",
+                "Contacts",
+                "Agents",
+                "Approvals",
+                "Settings"
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                className={`sidebar-item ${activeTab === tab ? "active" : ""}`}
+                onClick={() => {
+                  setActiveTab(tab);
+                  setSidebarOpen(false);
+                }}
+              >
+                {tab === "History" ? "Chat History / Conversations" : tab}
+              </button>
+            ))}
+          </nav>
+          <div className="sidebar-history">
+            <h3>Conversations</h3>
+            <ul className="os-list">
+              {snapshot.conversations.map((conversation) => (
+                <li key={conversation.id}>
+                  <button
+                    className={`conversation-item ${
+                      activeConversationId === conversation.id ? "active" : ""
+                    }`}
+                    type="button"
+                    onClick={() => void selectChat(conversation.id)}
+                  >
+                    <span>{conversation.title}</span>
+                    <small>{new Date(conversation.last_message_at).toLocaleDateString()}</small>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </aside>
+
       <header className="os-header">
+        <button className="menu-button" type="button" onClick={() => setSidebarOpen(true)}>
+          ☰
+        </button>
         <div>
           <h1>AJAWAI OS</h1>
           <p>President Console • {user.email ?? "Signed in"}</p>
@@ -129,165 +201,81 @@ export default function Dashboard({ session }: DashboardProps) {
       </header>
 
       <section className="os-content">
-        {activeTab === "Home" && (
+        {toast && (
+          <article className={`toast ${toast.kind}`}>
+            <p>{toast.message}</p>
+            <button type="button" onClick={clearToast}>
+              Dismiss
+            </button>
+          </article>
+        )}
+
+        {activeTab === "Chat" && (
           <div className="stack">
-            <article className="os-card">
-              <h2>Quick Command • {SECRETARY_NAME}</h2>
-              <form className="stack" onSubmit={submitCommand}>
-                <textarea
-                  className="os-input"
-                  rows={3}
-                  placeholder='Example: "Email 10 electricians asking for quotes."'
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                />
-                <button className="os-button gold" type="submit" disabled={busy}>
-                  {busy ? "Processing..." : "Send to Secretary Phi"}
-                </button>
-              </form>
+            <article className="os-card chat-thread">
+              {activeConversationMessages.map((message) => renderMessageCard(message))}
+              {activeConversationMessages.length === 0 && (
+                <article className="chat-message assistant">
+                  <span className="chat-role">{SECRETARY_NAME}</span>
+                  <p>Hello President. I am ready to coordinate with {MANAGER_NAME}.</p>
+                </article>
+              )}
             </article>
 
-            <article className="os-card">
-              <h2>Approval Center</h2>
-              <ul className="os-list">
-                {pendingApprovals.map((approval) => (
-                  <li key={approval.id} className="os-list-item">
-                    <p>{approval.action_type}</p>
-                    <small>{new Date(approval.created_at).toLocaleString()}</small>
-                    <div className="os-row">
-                      <button
-                        className="os-button teal"
-                        type="button"
-                        onClick={() => void approve(approval.id)}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        className="os-button ghost"
-                        type="button"
-                        onClick={() => void reject(approval.id)}
-                      >
-                        Reject
-                      </button>
-                    </div>
-                  </li>
-                ))}
-                {pendingApprovals.length === 0 && (
-                  <li className="os-list-item empty">No approvals pending.</li>
-                )}
-              </ul>
-            </article>
-
-            <div className="dashboard-grid">
-              <article className="os-card">
-                <h3>Recent Projects</h3>
-                <ul className="os-list">
-                  {recentProjects.map((project) => (
-                    <li key={project.id} className="os-list-item">
-                      <p>{project.name}</p>
-                      <small>{project.status}</small>
-                    </li>
-                  ))}
-                  {recentProjects.length === 0 && (
-                    <li className="os-list-item empty">No projects yet.</li>
-                  )}
-                </ul>
-              </article>
-
-              <article className="os-card">
-                <h3>Tasks Due</h3>
-                <ul className="os-list">
-                  {openTasks.map((task) => (
-                    <li key={task.id} className="os-list-item">
-                      <p>{task.title}</p>
-                      <small>
-                        {task.status} • {task.priority}
-                      </small>
-                    </li>
-                  ))}
-                  {openTasks.length === 0 && (
-                    <li className="os-list-item empty">No open tasks.</li>
-                  )}
-                </ul>
-              </article>
-            </div>
-
-            <div className="dashboard-grid">
-              <article className="os-card">
-                <h3>Agent Activity</h3>
-                <ul className="os-list">
-                  {recentMessages.slice(0, 5).map((msg) => (
-                    <li key={msg.id} className="os-list-item">
-                      <p>{msg.content}</p>
-                      <small>{msg.role.replace("_", " ")}</small>
-                    </li>
-                  ))}
-                  {recentMessages.length === 0 && (
-                    <li className="os-list-item empty">No agent messages yet.</li>
-                  )}
-                </ul>
-              </article>
-
-              <article className="os-card">
-                <h3>Recent Notes</h3>
-                <ul className="os-list">
-                  {recentNotes.map((note) => (
-                    <li key={note.id} className="os-list-item">
-                      <p>{note.title}</p>
-                      <small>{new Date(note.created_at).toLocaleDateString()}</small>
-                    </li>
-                  ))}
-                  {recentNotes.length === 0 && (
-                    <li className="os-list-item empty">No notes yet.</li>
-                  )}
-                </ul>
-              </article>
-            </div>
-
-            <article className="os-card">
-              <h3>Timeline / Activity Log</h3>
-              <ul className="os-list">
-                {recentTimeline.map((event) => (
-                  <li key={event.id} className="os-list-item">
-                    <p>{event.description}</p>
-                    <small>
-                      {event.event_type} • {new Date(event.created_at).toLocaleString()}
-                    </small>
-                  </li>
-                ))}
-                {recentTimeline.length === 0 && (
-                  <li className="os-list-item empty">No activity yet.</li>
-                )}
-              </ul>
-            </article>
+            <form className="chat-composer" onSubmit={submitCommand}>
+              <textarea
+                className="os-input"
+                rows={2}
+                placeholder='Message Secretary Phi... (e.g. "Email 10 electricians asking for quotes.")'
+                value={command}
+                onChange={(event) => setCommand(event.target.value)}
+              />
+              <button className="os-button gold" type="submit" disabled={busy || !activeConversationId}>
+                {busy ? "Thinking..." : "Send"}
+              </button>
+            </form>
           </div>
+        )}
+
+        {activeTab === "History" && (
+          <article className="os-card">
+            <h2>Conversations</h2>
+            <ul className="os-list">
+              {snapshot.conversations.map((conversation) => (
+                <li key={conversation.id} className="os-list-item">
+                  <p>{conversation.title}</p>
+                  <small>{new Date(conversation.last_message_at).toLocaleString()}</small>
+                  <div className="os-row">
+                    <button
+                      className="os-button teal"
+                      type="button"
+                      onClick={() => void selectChat(conversation.id)}
+                    >
+                      Open Chat
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {snapshot.conversations.length === 0 && (
+                <li className="os-list-item empty">No chats yet.</li>
+              )}
+            </ul>
+          </article>
         )}
 
         {activeTab === "Projects" && (
           <div className="stack">
             <article className="os-card">
-              <h2>Create Project</h2>
-              <form className="stack" onSubmit={submitProject}>
-                <input
-                  className="os-input"
-                  value={projectName}
-                  placeholder="Project name"
-                  onChange={(event) => setProjectName(event.target.value)}
-                />
-                <textarea
-                  className="os-input"
-                  rows={3}
-                  value={projectDescription}
-                  placeholder="Project description"
-                  onChange={(event) => setProjectDescription(event.target.value)}
-                />
-                <button className="os-button gold" type="submit" disabled={busy}>
-                  Save project
-                </button>
-              </form>
-            </article>
-            <article className="os-card">
               <h2>Projects</h2>
+              <div className="os-row">
+                <button
+                  className="os-button gold"
+                  type="button"
+                  onClick={() => setActiveTab("Chat")}
+                >
+                  Ask Secretary to create project
+                </button>
+              </div>
               <ul className="os-list">
                 {snapshot.projects.map((project) => (
                   <li key={project.id} className="os-list-item">
@@ -306,38 +294,16 @@ export default function Dashboard({ session }: DashboardProps) {
         {activeTab === "Tasks" && (
           <div className="stack">
             <article className="os-card">
-              <h2>Create Task</h2>
-              <form className="stack" onSubmit={submitTask}>
-                <input
-                  className="os-input"
-                  value={taskTitle}
-                  placeholder="Task title"
-                  onChange={(event) => setTaskTitle(event.target.value)}
-                />
-                <textarea
-                  className="os-input"
-                  rows={3}
-                  value={taskDescription}
-                  placeholder="Task description"
-                  onChange={(event) => setTaskDescription(event.target.value)}
-                />
-                <select
-                  className="os-input"
-                  value={taskPriority}
-                  onChange={(event) => setTaskPriority(event.target.value as Task["priority"])}
-                >
-                  <option value="low">Low priority</option>
-                  <option value="medium">Medium priority</option>
-                  <option value="high">High priority</option>
-                </select>
-                <button className="os-button gold" type="submit" disabled={busy}>
-                  Save task
-                </button>
-              </form>
-            </article>
-
-            <article className="os-card">
               <h2>Tasks</h2>
+              <div className="os-row">
+                <button
+                  className="os-button gold"
+                  type="button"
+                  onClick={() => setActiveTab("Chat")}
+                >
+                  Ask Secretary to create task
+                </button>
+              </div>
               <ul className="os-list">
                 {snapshot.tasks.map((task) => (
                   <li key={task.id} className="os-list-item">
@@ -345,22 +311,6 @@ export default function Dashboard({ session }: DashboardProps) {
                     <small>
                       {task.priority} • {task.status}
                     </small>
-                    <div className="os-row">
-                      <button
-                        className="os-button ghost"
-                        type="button"
-                        onClick={() => void setTaskStatus(task.id, "in_progress")}
-                      >
-                        In progress
-                      </button>
-                      <button
-                        className="os-button teal"
-                        type="button"
-                        onClick={() => void setTaskStatus(task.id, "done")}
-                      >
-                        Done
-                      </button>
-                    </div>
                   </li>
                 ))}
                 {snapshot.tasks.length === 0 && (
@@ -372,97 +322,50 @@ export default function Dashboard({ session }: DashboardProps) {
         )}
 
         {activeTab === "Notes" && (
-          <div className="stack">
-            <article className="os-card">
-              <h2>Create Note</h2>
-              <form className="stack" onSubmit={submitNote}>
-                <input
-                  className="os-input"
-                  value={noteTitle}
-                  placeholder="Note title"
-                  onChange={(event) => setNoteTitle(event.target.value)}
-                />
-                <textarea
-                  className="os-input"
-                  rows={4}
-                  value={noteContent}
-                  placeholder="Write note"
-                  onChange={(event) => setNoteContent(event.target.value)}
-                />
-                <button className="os-button gold" type="submit" disabled={busy}>
-                  Save note
-                </button>
-              </form>
-            </article>
-            <article className="os-card">
-              <h2>Notes</h2>
-              <ul className="os-list">
-                {snapshot.notes.map((note) => (
-                  <li key={note.id} className="os-list-item">
-                    <p>{note.title}</p>
-                    <small>{note.content.slice(0, 120)}</small>
-                  </li>
-                ))}
-                {snapshot.notes.length === 0 && (
-                  <li className="os-list-item empty">No notes yet.</li>
-                )}
-              </ul>
-            </article>
-          </div>
+          <article className="os-card">
+            <h2>Notes</h2>
+            <div className="os-row">
+              <button className="os-button gold" type="button" onClick={() => setActiveTab("Chat")}>
+                Ask Secretary to save a note
+              </button>
+            </div>
+            <ul className="os-list">
+              {snapshot.notes.map((note) => (
+                <li key={note.id} className="os-list-item">
+                  <p>{note.title}</p>
+                  <small>{note.content.slice(0, 120)}</small>
+                </li>
+              ))}
+              {snapshot.notes.length === 0 && (
+                <li className="os-list-item empty">No notes yet.</li>
+              )}
+            </ul>
+          </article>
         )}
 
         {activeTab === "Contacts" && (
-          <div className="stack">
-            <article className="os-card">
-              <h2>Add Contact</h2>
-              <form className="stack" onSubmit={submitContact}>
-                <input
-                  className="os-input"
-                  value={contactName}
-                  placeholder="Name"
-                  onChange={(event) => setContactName(event.target.value)}
-                />
-                <input
-                  className="os-input"
-                  value={contactEmail}
-                  placeholder="Email"
-                  onChange={(event) => setContactEmail(event.target.value)}
-                />
-                <input
-                  className="os-input"
-                  value={contactCompany}
-                  placeholder="Company"
-                  onChange={(event) => setContactCompany(event.target.value)}
-                />
-                <input
-                  className="os-input"
-                  value={contactPhone}
-                  placeholder="Phone"
-                  onChange={(event) => setContactPhone(event.target.value)}
-                />
-                <button className="os-button gold" type="submit" disabled={busy}>
-                  Save contact
-                </button>
-              </form>
-            </article>
-            <article className="os-card">
-              <h2>Contacts</h2>
-              <ul className="os-list">
-                {snapshot.contacts.map((contact) => (
-                  <li key={contact.id} className="os-list-item">
-                    <p>{contact.name}</p>
-                    <small>
-                      {contact.email}
-                      {contact.company ? ` • ${contact.company}` : ""}
-                    </small>
-                  </li>
-                ))}
-                {snapshot.contacts.length === 0 && (
-                  <li className="os-list-item empty">No contacts yet.</li>
-                )}
-              </ul>
-            </article>
-          </div>
+          <article className="os-card">
+            <h2>Contacts</h2>
+            <div className="os-row">
+              <button className="os-button gold" type="button" onClick={() => setActiveTab("Chat")}>
+                Ask Secretary to add contact
+              </button>
+            </div>
+            <ul className="os-list">
+              {snapshot.contacts.map((contact) => (
+                <li key={contact.id} className="os-list-item">
+                  <p>{contact.name}</p>
+                  <small>
+                    {contact.email}
+                    {contact.company ? ` • ${contact.company}` : ""}
+                  </small>
+                </li>
+              ))}
+              {snapshot.contacts.length === 0 && (
+                <li className="os-list-item empty">No contacts yet.</li>
+              )}
+            </ul>
+          </article>
         )}
 
         {activeTab === "Agents" && (
@@ -487,18 +390,53 @@ export default function Dashboard({ session }: DashboardProps) {
             <article className="os-card">
               <h2>Agent Conversation Log</h2>
               <ul className="os-list">
-                {snapshot.messages.map((msg) => (
+                {activeConversationMessages.map((msg) => (
                   <li key={msg.id} className="os-list-item">
                     <p>{msg.content}</p>
-                    <small>{msg.role.replace("_", " ")}</small>
+                    <small>
+                      {msg.role.replace("_", " ")} • {msg.type}
+                    </small>
                   </li>
                 ))}
-                {snapshot.messages.length === 0 && (
+                {activeConversationMessages.length === 0 && (
                   <li className="os-list-item empty">No agent conversation yet.</li>
                 )}
               </ul>
             </article>
           </div>
+        )}
+
+        {activeTab === "Approvals" && (
+          <article className="os-card">
+            <h2>Approval Center</h2>
+            <ul className="os-list">
+              {pendingApprovals.map((approval) => (
+                <li key={approval.id} className="os-list-item">
+                  <p>{approval.action_type}</p>
+                  <small>{new Date(approval.created_at).toLocaleString()}</small>
+                  <div className="os-row">
+                    <button
+                      className="os-button teal"
+                      type="button"
+                      onClick={() => void approve(approval.id, approvalConversationId)}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="os-button ghost"
+                      type="button"
+                      onClick={() => void reject(approval.id, approvalConversationId)}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {pendingApprovals.length === 0 && (
+                <li className="os-list-item empty">No approvals pending.</li>
+              )}
+            </ul>
+          </article>
         )}
 
         {activeTab === "Settings" && (
@@ -543,6 +481,18 @@ export default function Dashboard({ session }: DashboardProps) {
             </article>
 
             <article className="os-card">
+              <h2>Recent Projects</h2>
+              <ul className="os-list">
+                {recentProjects.map((project) => (
+                  <li key={project.id} className="os-list-item">
+                    <p>{project.name}</p>
+                    <small>{project.status}</small>
+                  </li>
+                ))}
+              </ul>
+            </article>
+
+            <article className="os-card">
               <h2>Account</h2>
               <button className="os-button ghost" type="button" onClick={() => void logout()}>
                 Logout
@@ -551,21 +501,6 @@ export default function Dashboard({ session }: DashboardProps) {
           </div>
         )}
       </section>
-
-      <nav className="os-tabbar">
-        {(
-          ["Home", "Projects", "Tasks", "Notes", "Contacts", "Agents", "Settings"] as const
-        ).map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className={`os-tab ${activeTab === tab ? "active" : ""}`}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab}
-          </button>
-        ))}
-      </nav>
     </main>
   );
 }

@@ -2,13 +2,18 @@ import type {
   Approval,
   Contact,
   Note,
-  PhiResponse,
   Profile,
   Project,
   Task,
   Timeline
 } from "@ajawai/shared";
-import { db, nowIso, type AgentMessage, type MemoryEntry } from "../storage/db";
+import {
+  db,
+  nowIso,
+  type AgentMessage,
+  type Conversation,
+  type MemoryEntry
+} from "../storage/db";
 import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import { phiLLM } from "./phi";
@@ -39,6 +44,18 @@ interface GmailStatus {
   detail: string;
 }
 
+export interface ActionResult {
+  ok: boolean;
+  kind:
+    | "approved"
+    | "rejected"
+    | "gmail_not_connected"
+    | "gmail_send_success"
+    | "gmail_send_failed";
+  message: string;
+  connectUrl?: string | null;
+}
+
 export interface Module3Snapshot {
   profiles: Profile[];
   projects: Project[];
@@ -48,6 +65,8 @@ export interface Module3Snapshot {
   approvals: Approval[];
   timeline: Timeline[];
   memory: MemoryEntry[];
+  conversations: Conversation[];
+  activeConversationId: string | null;
   messages: AgentMessage[];
 }
 
@@ -91,25 +110,42 @@ const safeText = (value: string | undefined, fallback: string) => {
 };
 
 export class PicoClawManager {
+  private activeConversationSettingKey = "active_conversation_id";
+
   async bootstrap(userId: string) {
     const existing = await db.profiles.where("user_id").equals(userId).first();
-    if (existing) {
-      return existing;
+    if (!existing) {
+      const profile: Profile = {
+        id: crypto.randomUUID(),
+        user_id: userId,
+        full_name: "President",
+        company: "AJAWAI",
+        role: "President",
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        created_at: nowIso(),
+        updated_at: nowIso()
+      };
+      await db.profiles.put(profile);
+      await this.logTimeline("profile_created", "Profile initialized for local-first OS.", null);
     }
 
-    const profile: Profile = {
-      id: crypto.randomUUID(),
-      user_id: userId,
-      full_name: "President",
-      company: "AJAWAI",
-      role: "President",
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-      created_at: nowIso(),
-      updated_at: nowIso()
-    };
-    await db.profiles.put(profile);
-    await this.logTimeline("profile_created", "Profile initialized for local-first OS.", null);
-    return profile;
+    const activeConversationId = await this.ensureActiveConversation(userId);
+    const profile = await db.profiles.where("user_id").equals(userId).first();
+
+    const hasMessages = await db.messages
+      .where("conversation_id")
+      .equals(activeConversationId)
+      .count();
+    if (hasMessages === 0) {
+      await this.addMessage({
+        conversationId: activeConversationId,
+        role: "manager_pico",
+        type: "system_notice",
+        content: `${MANAGER_NAME} organized next steps.`
+      });
+    }
+
+    return profile!;
   }
 
   async getSnapshot(): Promise<Module3Snapshot> {
@@ -127,7 +163,9 @@ export class PicoClawManager {
       approvals: await db.approvals.orderBy("updated_at").reverse().toArray(),
       timeline: await db.timeline.orderBy("updated_at").reverse().toArray(),
       memory: await db.memory.orderBy("updated_at").reverse().toArray(),
-      messages: await db.messages.orderBy("created_at").reverse().toArray()
+      conversations: await db.conversations.orderBy("last_message_at").reverse().toArray(),
+      activeConversationId: await this.getActiveConversationId(),
+      messages: await db.messages.orderBy("created_at").toArray()
     };
     localCache.set("module3:snapshot", snapshot, 10_000);
     return snapshot;
@@ -137,14 +175,102 @@ export class PicoClawManager {
     localCache.invalidate("module3:snapshot");
   }
 
-  private async addMessage(role: AgentMessage["role"], content: string) {
+  private async addMessage(input: {
+    conversationId: string;
+    role: AgentMessage["role"];
+    type: AgentMessage["type"];
+    content: string;
+    payload?: Record<string, unknown>;
+  }) {
     await db.messages.put({
       id: crypto.randomUUID(),
-      role,
-      content,
+      conversation_id: input.conversationId,
+      role: input.role,
+      type: input.type,
+      content: input.content,
+      payload: input.payload,
       created_at: nowIso()
     });
+    await db.conversations.update(input.conversationId, {
+      updated_at: nowIso(),
+      last_message_at: nowIso()
+    });
     this.invalidateSnapshot();
+  }
+
+  private async getActiveConversationId() {
+    const setting = await db.settings.get(this.activeConversationSettingKey);
+    return setting?.value ?? null;
+  }
+
+  private async setActiveConversation(conversationId: string) {
+    await db.settings.put({
+      key: this.activeConversationSettingKey,
+      value: conversationId,
+      updated_at: nowIso()
+    });
+    this.invalidateSnapshot();
+  }
+
+  async createConversation(userId: string, title = "New Chat") {
+    const conversation: Conversation = {
+      id: crypto.randomUUID(),
+      user_id: userId,
+      title,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      last_message_at: nowIso()
+    };
+    await db.conversations.put(conversation);
+    await this.setActiveConversation(conversation.id);
+    await this.addMessage({
+      conversationId: conversation.id,
+      role: "secretary_phi",
+      type: "assistant",
+      content: `${SECRETARY_NAME} is ready. How can I help today?`
+    });
+    return conversation;
+  }
+
+  private async ensureActiveConversation(userId: string) {
+    const activeConversationId = await this.getActiveConversationId();
+    if (activeConversationId) {
+      const existing = await db.conversations.get(activeConversationId);
+      if (existing) {
+        return existing.id;
+      }
+    }
+
+    const existingForUser = await db.conversations.where("user_id").equals(userId).first();
+    if (existingForUser) {
+      await this.setActiveConversation(existingForUser.id);
+      return existingForUser.id;
+    }
+
+    const conversation = await this.createConversation(userId, "New Chat");
+    return conversation.id;
+  }
+
+  async selectConversation(conversationId: string) {
+    await this.setActiveConversation(conversationId);
+  }
+
+  private async resolveConversationId(preferredId: string) {
+    if (preferredId) {
+      const existing = await db.conversations.get(preferredId);
+      if (existing) {
+        return existing.id;
+      }
+    }
+    const active = await this.getActiveConversationId();
+    if (active) {
+      return active;
+    }
+    const fallback = await db.conversations.orderBy("updated_at").reverse().first();
+    if (fallback) {
+      return fallback.id;
+    }
+    throw new Error("No conversation available.");
   }
 
   private async logTimeline(eventType: string, description: string, projectId: string | null) {
@@ -293,23 +419,69 @@ export class PicoClawManager {
     return relayResult;
   }
 
-  async approve(approvalId: string) {
+  async approve(approvalId: string, conversationId: string): Promise<ActionResult> {
+    const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
     if (!approval || approval.status !== "pending") {
-      return;
+      return {
+        ok: false,
+        kind: "gmail_send_failed",
+        message: "Approval is no longer pending."
+      };
     }
 
-    approval.status = "approved";
-    approval.approved_at = nowIso();
-    approval.updated_at = nowIso();
-    await db.approvals.put(approval);
-
     if (approval.action_type === "send_email") {
+      const gmailStatus = await this.getGmailStatus();
+      if (!gmailStatus.connected) {
+        const connectUrl = await this.getGmailConnectUrl();
+        await this.addMessage({
+          conversationId: resolvedConversationId,
+          role: "manager_pico",
+          type: "gmail_connection_required_card",
+          content: "Gmail connection required before approval can send email.",
+          payload: {
+            status: gmailStatus.detail
+          }
+        });
+        await this.logTimeline(
+          "gmail_connection_required",
+          "Approval blocked: Gmail is not connected.",
+          null
+        );
+        return {
+          ok: false,
+          kind: "gmail_not_connected",
+          message: "Gmail not connected. Connect Gmail before approving send_email.",
+          connectUrl
+        };
+      }
+
       const payload = parseSendEmailPayload(approval);
       if (!payload) {
         throw new Error("Invalid send_email approval payload.");
       }
-      await this.sendEmail(payload);
+      try {
+        await this.sendEmail(payload);
+      } catch (error) {
+        await this.addMessage({
+          conversationId: resolvedConversationId,
+          role: "manager_pico",
+          type: "system_notice",
+          content: `Email send failed: ${error instanceof Error ? error.message : "unknown error"}`
+        });
+        await this.logTimeline("email_send_failed", "Email send failed after approval attempt.", null);
+        return {
+          ok: false,
+          kind: "gmail_send_failed",
+          message: error instanceof Error ? error.message : "Email send failed."
+        };
+      }
+
+      approval.status = "approved";
+      approval.approved_at = nowIso();
+      approval.updated_at = nowIso();
+      await db.approvals.put(approval);
+
       if (payload.task_id) {
         const task = await db.tasks.get(payload.task_id);
         if (task) {
@@ -318,7 +490,29 @@ export class PicoClawManager {
           await db.tasks.put(task);
         }
       }
+
+      await this.addMessage({
+        conversationId: resolvedConversationId,
+        role: "manager_pico",
+        type: "gmail_connected_status_card",
+        content: "Gmail send succeeded after approval.",
+        payload: {
+          approval_id: approval.id
+        }
+      });
+      await this.logTimeline("approval_granted", `Approval granted: ${approval.action_type}`, null);
+      this.invalidateSnapshot();
+      return {
+        ok: true,
+        kind: "gmail_send_success",
+        message: "Email sent successfully."
+      };
     }
+
+    approval.status = "approved";
+    approval.approved_at = nowIso();
+    approval.updated_at = nowIso();
+    await db.approvals.put(approval);
 
     if (approval.action_type === "create_task") {
       const payload = parseCreateTaskPayload(approval);
@@ -341,38 +535,93 @@ export class PicoClawManager {
     }
 
     await this.logTimeline("approval_granted", `Approval granted: ${approval.action_type}`, null);
-    await this.addMessage("manager_pico", `${MANAGER_NAME} executed approved action: ${approval.action_type}.`);
+    await this.addMessage({
+      conversationId: resolvedConversationId,
+      role: "manager_pico",
+      type: "system_notice",
+      content: `${MANAGER_NAME} executed approved action: ${approval.action_type}.`
+    });
     this.invalidateSnapshot();
+    return {
+      ok: true,
+      kind: "approved",
+      message: `Approved ${approval.action_type}.`
+    };
   }
 
-  async reject(approvalId: string) {
+  async reject(approvalId: string, conversationId: string): Promise<ActionResult> {
+    const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
     if (!approval || approval.status !== "pending") {
-      return;
+      return {
+        ok: false,
+        kind: "rejected",
+        message: "Approval is no longer pending."
+      };
     }
     approval.status = "rejected";
     approval.updated_at = nowIso();
     await db.approvals.put(approval);
     await this.logTimeline("approval_rejected", `Approval rejected: ${approval.action_type}`, null);
+    await this.addMessage({
+      conversationId: resolvedConversationId,
+      role: "manager_pico",
+      type: "system_notice",
+      content: `${MANAGER_NAME} rejected action: ${approval.action_type}.`
+    });
     this.invalidateSnapshot();
+    return {
+      ok: true,
+      kind: "rejected",
+      message: `Rejected ${approval.action_type}.`
+    };
   }
 
-  async executeSecretaryCommand(userId: string, command: string) {
-    await this.addMessage("president", command);
+  async executeSecretaryCommand(userId: string, conversationId: string, command: string) {
+    await this.addMessage({
+      conversationId,
+      role: "president",
+      type: "user",
+      content: command
+    });
+
+    const conversation = await db.conversations.get(conversationId);
+    if (conversation && conversation.title === "New Chat") {
+      conversation.title = command.slice(0, 42);
+      conversation.updated_at = nowIso();
+      conversation.last_message_at = nowIso();
+      await db.conversations.put(conversation);
+    }
 
     const phiResult = await phiLLM(command);
-    await this.addMessage("secretary_phi", phiResult.response);
+    await this.addMessage({
+      conversationId,
+      role: "secretary_phi",
+      type: "assistant",
+      content: phiResult.response
+    });
 
     switch (phiResult.intent) {
       case "create_project": {
         const projectName = safeText(phiResult.project_name, "Untitled Project");
-        await this.createProject(userId, projectName, phiResult.summary);
+        const project = await this.createProject(userId, projectName, phiResult.summary);
+        await this.addMessage({
+          conversationId,
+          role: "manager_pico",
+          type: "project_created_card",
+          content: "Project created.",
+          payload: {
+            id: project.id,
+            name: project.name,
+            status: project.status
+          }
+        });
         break;
       }
       case "create_task": {
         const taskTitle = safeText(phiResult.task_title, "New Task");
         if (phiResult.requires_approval) {
-          await this.createApproval("create_task", {
+          const approval = await this.createApproval("create_task", {
             title: taskTitle,
             description: phiResult.summary
           });
@@ -381,10 +630,31 @@ export class PicoClawManager {
             `Task "${taskTitle}" queued for approval.`,
             null
           );
+          await this.addMessage({
+            conversationId,
+            role: "manager_pico",
+            type: "approval_request_card",
+            content: "Approval required before creating this task.",
+            payload: {
+              approval_id: approval.id,
+              action_type: approval.action_type
+            }
+          });
         } else {
-          await this.createTask({
+          const task = await this.createTask({
             title: taskTitle,
             description: phiResult.summary
+          });
+          await this.addMessage({
+            conversationId,
+            role: "manager_pico",
+            type: "task_created_card",
+            content: "Task created.",
+            payload: {
+              id: task.id,
+              title: task.title,
+              status: task.status
+            }
           });
         }
         break;
@@ -393,7 +663,7 @@ export class PicoClawManager {
         const contactName = safeText(phiResult.contact_name, "New Contact");
         const contactEmail = safeText(phiResult.contact_email, "contact@example.com");
         if (phiResult.requires_approval) {
-          await this.createApproval("contact_subcontractor", {
+          const approval = await this.createApproval("contact_subcontractor", {
             name: contactName,
             email: contactEmail
           });
@@ -402,18 +672,44 @@ export class PicoClawManager {
             `Contact "${contactName}" queued for approval.`,
             null
           );
+          await this.addMessage({
+            conversationId,
+            role: "manager_pico",
+            type: "approval_request_card",
+            content: "Approval required before contacting subcontractor.",
+            payload: {
+              approval_id: approval.id,
+              action_type: approval.action_type
+            }
+          });
         } else {
-          await this.createContact(contactName, contactEmail);
+          const contact = await this.createContact(contactName, contactEmail);
+          await this.addMessage({
+            conversationId,
+            role: "manager_pico",
+            type: "system_notice",
+            content: `Contact created: ${contact.name}`
+          });
         }
         break;
       }
       case "create_note": {
-        await this.createNote(
+        const note = await this.createNote(
           userId,
           safeText(phiResult.note_title, "President Note"),
           safeText(phiResult.note_content, command),
           null
         );
+        await this.addMessage({
+          conversationId,
+          role: "manager_pico",
+          type: "note_saved_card",
+          content: "Note saved.",
+          payload: {
+            id: note.id,
+            title: note.title
+          }
+        });
         break;
       }
       case "search_memory": {
@@ -422,7 +718,12 @@ export class PicoClawManager {
         const summary = matches.length
           ? `Found ${matches.length} memory item(s) for "${query}".`
           : `No memory matches for "${query}" yet.`;
-        await this.addMessage("secretary_phi", summary);
+        await this.addMessage({
+          conversationId,
+          role: "secretary_phi",
+          type: "assistant",
+          content: summary
+        });
         await this.logTimeline("memory_search", summary, null);
         break;
       }
@@ -448,7 +749,7 @@ export class PicoClawManager {
           priority: "high"
         });
 
-        await this.createApproval("send_email", {
+        const approval = await this.createApproval("send_email", {
           to: to.length > 0 ? to : ["recipient@example.com"],
           subject,
           body,
@@ -456,14 +757,45 @@ export class PicoClawManager {
         });
 
         await this.logTimeline("email_drafted", "Secretary drafted email and queued approval.", null);
+        await this.addMessage({
+          conversationId,
+          role: "manager_pico",
+          type: "approval_request_card",
+          content: "Email queued. Approval required before sending.",
+          payload: {
+            approval_id: approval.id,
+            to: to.length > 0 ? to : ["recipient@example.com"],
+            subject
+          }
+        });
+        await this.addMessage({
+          conversationId,
+          role: "manager_pico",
+          type: "system_notice",
+          content: `${MANAGER_NAME} organized next steps and queued email for approval.`
+        });
         break;
       }
       default: {
         await this.logTimeline("command_interpreted", phiResult.summary, null);
+        await this.addMessage({
+          conversationId,
+          role: "manager_pico",
+          type: "system_notice",
+          content: `${MANAGER_NAME} organized next steps.`
+        });
       }
     }
 
     await this.remember("last_command", command);
+    if (command.toLowerCase().includes("remember")) {
+      await this.addMessage({
+        conversationId,
+        role: "manager_pico",
+        type: "memory_saved_card",
+        content: "Memory saved locally."
+      });
+    }
     this.invalidateSnapshot();
     return phiResult;
   }
