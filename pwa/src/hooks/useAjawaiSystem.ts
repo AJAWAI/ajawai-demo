@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
-import { picoClawManager, type Module3Snapshot } from "../agents/picoClaw";
+import {
+  picoClawManager,
+  type CommandDebugInfo,
+  type Module3Snapshot
+} from "../agents/picoClaw";
 import { phiSystemStatus } from "../agents/phi";
 import { syncWithSupabase, type SyncState as SyncStateType } from "../sync/supabaseSync";
 import { supabase } from "../lib/supabase";
@@ -73,6 +77,7 @@ export const useAjawaiSystem = (session: Session) => {
     conversationId: string;
     at: string;
   } | null>(null);
+  const [debugTraces, setDebugTraces] = useState<CommandDebugInfo[]>([]);
   const activeRunId = useRef<number | null>(null);
   const runCounter = useRef(0);
 
@@ -207,11 +212,14 @@ export const useAjawaiSystem = (session: Session) => {
       setThinking(true);
       setBusy(true);
       try {
-        await withTimeout(
+        const result = await withTimeout(
           picoClawManager.executeSecretaryCommand(user.id, conversationId, command),
           REQUEST_TIMEOUT_MS,
           "Request timed out. Please retry."
         );
+        if (result?.debug) {
+          setDebugTraces((prev) => [result.debug as CommandDebugInfo, ...prev].slice(0, 15));
+        }
         if (activeRunId.current !== nextRunId) {
           return;
         }
@@ -220,6 +228,17 @@ export const useAjawaiSystem = (session: Session) => {
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Request failed. Please retry your message.";
+        const errorTrace: CommandDebugInfo = {
+          intent: "error",
+          route: "direct_conversational",
+          search_used: false,
+          pico_used: false,
+          memory_used: false,
+          fallback_triggered: false,
+          quality_guard_triggered: false,
+          at: new Date().toISOString()
+        };
+        setDebugTraces((prev) => [errorTrace, ...prev].slice(0, 15));
         setChatError({
           message,
           command,
@@ -409,6 +428,7 @@ export const useAjawaiSystem = (session: Session) => {
     runCommand,
     retryLastCommand,
     resetThinkingState,
+    debugTraces,
     approve,
     reject,
     syncNow,

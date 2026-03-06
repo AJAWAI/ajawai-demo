@@ -40,6 +40,7 @@ export default function Dashboard({ session }: DashboardProps) {
     runCommand,
     retryLastCommand,
     resetThinkingState,
+    debugTraces,
     approve,
     reject,
     syncNow,
@@ -672,6 +673,30 @@ export default function Dashboard({ session }: DashboardProps) {
               <button className="os-button ghost" type="button" onClick={() => void logout()}>
                 Logout
               </button>
+            </article>
+
+            <article className="os-card">
+              <h2>Developer Debug</h2>
+              <small>Recent assistant routing diagnostics (latest first).</small>
+              <ul className="os-list">
+                {debugTraces.map((trace, index) => (
+                  <li key={`${trace.at}-${index}`} className="os-list-item">
+                    <p>
+                      Route: {trace.route.replaceAll("_", " ")} • Intent: {trace.intent}
+                    </p>
+                    <small>
+                      search={trace.search_used ? "yes" : "no"} • pico={trace.pico_used ? "yes" : "no"} •
+                      memory={trace.memory_used ? "yes" : "no"} • fallback=
+                      {trace.fallback_triggered ? "yes" : "no"} • quality_guard=
+                      {trace.quality_guard_triggered ? "yes" : "no"} •{" "}
+                      {new Date(trace.at).toLocaleTimeString()}
+                    </small>
+                  </li>
+                ))}
+                {debugTraces.length === 0 && (
+                  <li className="os-list-item empty">No traces yet.</li>
+                )}
+              </ul>
             </article>
           </div>
         )}

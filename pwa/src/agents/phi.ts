@@ -22,10 +22,23 @@ export interface SearchSynthesisInput {
   warnings: string[];
 }
 
+export interface PhiDebugMeta {
+  mode: "heuristic" | "model" | "model_with_fallback";
+  usedWeakRepair: boolean;
+  usedSearchHeuristic: boolean;
+  checkedAt: string;
+}
+
 const now = () => new Date().toISOString();
 
 let generatorPromise: Promise<GeneratorFn | null> | null = null;
 let runtimeState: RuntimeState = "initializing";
+let lastPhiDebugMeta: PhiDebugMeta = {
+  mode: "heuristic",
+  usedWeakRepair: false,
+  usedSearchHeuristic: false,
+  checkedAt: now()
+};
 
 const jsonFromText = (text: string): unknown | null => {
   const start = text.indexOf("{");
@@ -114,6 +127,14 @@ const looksLikeWeakSynthesis = (reply: string) => {
   );
 };
 
+const markPhiDebug = (next: Partial<PhiDebugMeta>) => {
+  lastPhiDebugMeta = {
+    ...lastPhiDebugMeta,
+    ...next,
+    checkedAt: now()
+  };
+};
+
 const sanitizeModelAnswer = (text: string) => {
   return text
     .replace(/^assistant:\s*/i, "")
@@ -140,10 +161,6 @@ const extractTopicFromQuestion = (prompt: string) => {
 };
 
 const currentInfoPatterns = [
-  /\bwho is\b/i,
-  /\bwho's\b/i,
-  /\bwhat is\b/i,
-  /\bwhat's\b/i,
   /\bnet worth\b/i,
   /\bbillionaire\b/i,
   /\btoday\b/i,
@@ -180,9 +197,6 @@ export const shouldUseWebSearch = (prompt: string) => {
     return false;
   }
   if (currentInfoPatterns.some((pattern) => pattern.test(normalized))) {
-    return true;
-  }
-  if (/^(who|what|when|where)\b/i.test(normalized)) {
     return true;
   }
   return false;
@@ -397,7 +411,11 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return buildFactualFallback(normalized);
   }
 
-  return `Here is a direct answer: ${normalized}. If you want, I can also provide a concise step-by-step version.`;
+  const topic = extractTopicFromQuestion(normalized);
+  return [
+    `Here is a direct answer about ${topic}.`,
+    "I can also format it as a checklist or step-by-step guide if you want."
+  ].join(" ");
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
@@ -663,6 +681,21 @@ const buildSearchSynthesisPrompt = (input: SearchSynthesisInput) => {
   ].join("\n");
 };
 
+const buildConciseFallbackAnswer = (prompt: string) => {
+  const normalized = prompt.trim();
+  const lower = normalized.toLowerCase();
+  if (lower.includes("pesto")) {
+    return buildPestoRecipeReply();
+  }
+  if (lower.includes("chicken soup")) {
+    return buildChickenSoupReply();
+  }
+  if (lower.includes("invoice factoring")) {
+    return buildInvoiceFactoringReply();
+  }
+  return buildFriendlyConversationalReply(prompt);
+};
+
 const deterministicSearchSynthesis = (input: SearchSynthesisInput) => {
   const direct = input.answerHint || input.keyFacts[0] || input.sources[0]?.snippet || "I could not verify a reliable answer yet.";
   const contextLine = input.keyFacts[1] || input.sources[1]?.snippet || "";
@@ -680,6 +713,30 @@ const deterministicSearchSynthesis = (input: SearchSynthesisInput) => {
 };
 
 export const getPhiRuntimeState = () => runtimeState;
+export const getLastPhiDebugMeta = () => lastPhiDebugMeta;
+
+export const phiDirectAnswer = async (prompt: string): Promise<string> => {
+  const fallback = buildConciseFallbackAnswer(prompt);
+  const generator = await initializeLocalPhi();
+  if (!generator) {
+    return fallback;
+  }
+
+  try {
+    const output = await generator(buildDirectAnswerPrompt(prompt), {
+      max_new_tokens: 420,
+      temperature: 0.4,
+      return_full_text: false
+    });
+    const text = sanitizeModelAnswer(output[0]?.generated_text ?? "");
+    if (!text || looksLikeWeakReply(text)) {
+      return fallback;
+    }
+    return text;
+  } catch {
+    return fallback;
+  }
+};
 
 export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Promise<string> => {
   const fallback = deterministicSearchSynthesis(input);
@@ -707,11 +764,21 @@ export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Pr
 export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
   const deterministic = heuristicPhi(prompt);
   if (deterministic.intent !== "conversational") {
+    markPhiDebug({
+      mode: "heuristic",
+      usedWeakRepair: false,
+      usedSearchHeuristic: Boolean(deterministic.needs_web_search)
+    });
     return deterministic;
   }
 
   const generator = await initializeLocalPhi();
   if (!generator) {
+    markPhiDebug({
+      mode: "heuristic",
+      usedWeakRepair: false,
+      usedSearchHeuristic: Boolean(deterministic.needs_web_search)
+    });
     return deterministic;
   }
 
@@ -738,11 +805,18 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
       const modelResult = parsed.data;
       if (modelResult.intent === "conversational" || modelResult.intent === "general") {
         let directResponse = sanitizeModelAnswer(modelResult.response);
+        let usedWeakRepair = false;
         if (!directResponse || looksLikeWeakReply(directResponse)) {
           const generated = await generateDirectAnswer().catch(() => "");
           directResponse =
             generated && !looksLikeWeakReply(generated) ? generated : deterministic.response;
+          usedWeakRepair = true;
         }
+        markPhiDebug({
+          mode: usedWeakRepair ? "model_with_fallback" : "model",
+          usedWeakRepair,
+          usedSearchHeuristic: shouldUseWebSearch(prompt)
+        });
         return phiResponseSchema.parse({
           ...modelResult,
           intent: "conversational",
@@ -753,10 +827,20 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
           requires_approval: false
         });
       }
+      markPhiDebug({
+        mode: "model",
+        usedWeakRepair: false,
+        usedSearchHeuristic: Boolean(modelResult.needs_web_search)
+      });
       return modelResult;
     }
     const generated = await generateDirectAnswer().catch(() => "");
     if (generated && !looksLikeWeakReply(generated)) {
+      markPhiDebug({
+        mode: "model_with_fallback",
+        usedWeakRepair: true,
+        usedSearchHeuristic: shouldUseWebSearch(prompt)
+      });
       return phiResponseSchema.parse({
         ...deterministic,
         intent: "conversational",
@@ -767,9 +851,19 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
         requires_approval: false
       });
     }
+    markPhiDebug({
+      mode: "heuristic",
+      usedWeakRepair: true,
+      usedSearchHeuristic: shouldUseWebSearch(prompt)
+    });
     return deterministic;
   } catch {
     runtimeState = "fallback";
+    markPhiDebug({
+      mode: "heuristic",
+      usedWeakRepair: true,
+      usedSearchHeuristic: shouldUseWebSearch(prompt)
+    });
     return deterministic;
   }
 };
