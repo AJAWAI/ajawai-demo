@@ -14,12 +14,15 @@ export interface MemoryEntry {
   user_id: string;
   key: string;
   value: string;
+  category: string;
+  source: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface AgentMessage {
   id: string;
+  user_id: string;
   conversation_id: string;
   role: "president" | "secretary_phi" | "manager_pico";
   type:
@@ -46,6 +49,8 @@ export interface AgentMessage {
 }
 
 export interface LocalSetting {
+  id: string;
+  user_id: string;
   key: string;
   value: string;
   updated_at: string;
@@ -71,11 +76,11 @@ class AjawaiDb extends Dexie {
   memory!: EntityTable<MemoryEntry, "id">;
   conversations!: EntityTable<Conversation, "id">;
   messages!: EntityTable<AgentMessage, "id">;
-  settings!: EntityTable<LocalSetting, "key">;
+  settings!: EntityTable<LocalSetting, "id">;
 
   constructor() {
     super("ajawai-demo-db");
-    this.version(4).stores({
+    this.version(5).stores({
       profiles: "id, user_id, updated_at",
       projects: "id, owner_id, status, updated_at",
       tasks: "id, project_id, status, priority, requires_approval, updated_at",
@@ -85,8 +90,8 @@ class AjawaiDb extends Dexie {
       timeline: "id, event_type, project_id, updated_at",
       memory: "id, user_id, key, updated_at",
       conversations: "id, user_id, last_message_at, updated_at",
-      messages: "id, conversation_id, role, type, created_at",
-      settings: "key, updated_at"
+      messages: "id, user_id, conversation_id, role, type, created_at",
+      settings: "id, user_id, key, updated_at"
     });
   }
 }

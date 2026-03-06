@@ -77,6 +77,47 @@ create table if not exists timeline (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists memory (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  key text not null,
+  value text not null,
+  category text not null default 'general',
+  source text not null default 'secretary_phi',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists conversations (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  title text not null default 'New Chat',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  last_message_at timestamptz not null default now()
+);
+
+create table if not exists messages (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  role text not null,
+  type text not null,
+  content text not null,
+  payload jsonb null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists settings (
+  id text primary key,
+  user_id uuid not null,
+  key text not null,
+  value text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create or replace function set_updated_at()
 returns trigger as $$
 begin
@@ -119,3 +160,44 @@ drop trigger if exists trg_timeline_updated_at on timeline;
 create trigger trg_timeline_updated_at
 before update on timeline
 for each row execute function set_updated_at();
+
+drop trigger if exists trg_memory_updated_at on memory;
+create trigger trg_memory_updated_at
+before update on memory
+for each row execute function set_updated_at();
+
+drop trigger if exists trg_conversations_updated_at on conversations;
+create trigger trg_conversations_updated_at
+before update on conversations
+for each row execute function set_updated_at();
+
+drop trigger if exists trg_messages_updated_at on messages;
+create trigger trg_messages_updated_at
+before update on messages
+for each row execute function set_updated_at();
+
+drop trigger if exists trg_settings_updated_at on settings;
+create trigger trg_settings_updated_at
+before update on settings
+for each row execute function set_updated_at();
+
+alter table memory enable row level security;
+alter table conversations enable row level security;
+alter table messages enable row level security;
+alter table settings enable row level security;
+
+drop policy if exists memory_owner_policy on memory;
+create policy memory_owner_policy on memory
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists conversations_owner_policy on conversations;
+create policy conversations_owner_policy on conversations
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists messages_owner_policy on messages;
+create policy messages_owner_policy on messages
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists settings_owner_policy on settings;
+create policy settings_owner_policy on settings
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

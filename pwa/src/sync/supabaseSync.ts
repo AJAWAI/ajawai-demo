@@ -1,57 +1,95 @@
 import { supabase } from "../lib/supabase";
 import { db, nowIso } from "../storage/db";
 
+const supabaseClient = supabase as any;
+
 type SyncableRow = {
   id: string;
   updated_at?: string;
   created_at?: string;
 };
 
-const readTimestamp = (row: SyncableRow) => row.updated_at ?? row.created_at ?? "";
+export type SyncState = "synced" | "pending_sync" | "offline_cache_only";
 
-const isRemoteNewer = (remote: SyncableRow, local: SyncableRow | undefined) => {
-  if (!local) {
-    return true;
+const readTimestamp = (row: SyncableRow) =>
+  Date.parse(row.updated_at ?? row.created_at ?? "1970-01-01T00:00:00.000Z");
+
+const chooseWinner = <T extends SyncableRow>(local?: T, remote?: T): T | null => {
+  if (!local && !remote) {
+    return null;
   }
-  return readTimestamp(remote) > readTimestamp(local);
+  if (!local && remote) {
+    return remote;
+  }
+  if (!remote && local) {
+    return local;
+  }
+  if (!local || !remote) {
+    return null;
+  }
+  return readTimestamp(local) >= readTimestamp(remote) ? local : remote;
 };
 
-const syncTable = async <T extends SyncableRow>(
-  tableName: "profiles" | "projects" | "tasks" | "contacts" | "notes" | "approvals" | "timeline",
-  localRows: T[],
-  saveLocalRows: (rows: T[]) => Promise<unknown>
-) => {
-  const upsertResult = await supabase.from(tableName).upsert(localRows, {
-    onConflict: "id"
-  });
-  if (upsertResult.error) {
-    throw upsertResult.error;
-  }
+type TableName =
+  | "profiles"
+  | "projects"
+  | "tasks"
+  | "contacts"
+  | "notes"
+  | "approvals"
+  | "timeline"
+  | "memory"
+  | "conversations"
+  | "messages"
+  | "settings";
 
-  const remoteResult = await supabase.from(tableName).select("*").limit(500);
+type TableConfig<T extends SyncableRow> = {
+  name: TableName;
+  readLocal: () => Promise<T[]>;
+  writeLocal: (rows: T[]) => Promise<unknown>;
+  filterColumn?: string;
+};
+
+const syncTable = async <T extends SyncableRow>(config: TableConfig<T>, userId: string) => {
+  let query = supabaseClient.from(config.name).select("*").limit(1000);
+  if (config.filterColumn) {
+    query = query.eq(config.filterColumn, userId);
+  }
+  const remoteResult = await query;
   if (remoteResult.error) {
     throw remoteResult.error;
   }
 
+  const localRows = await config.readLocal();
   const remoteRows = (remoteResult.data ?? []) as T[];
-  const localMap = new Map(localRows.map((row) => [row.id, row]));
 
-  const rowsToWriteLocal: T[] = [];
-  for (const remote of remoteRows) {
-    const local = localMap.get(remote.id);
-    if (isRemoteNewer(remote, local)) {
-      rowsToWriteLocal.push(remote);
+  const localMap = new Map(localRows.map((row) => [row.id, row]));
+  const remoteMap = new Map(remoteRows.map((row) => [row.id, row]));
+  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+
+  const winners: T[] = [];
+  for (const id of allIds) {
+    const winner = chooseWinner(localMap.get(id), remoteMap.get(id));
+    if (winner) {
+      winners.push(winner);
     }
   }
 
-  if (rowsToWriteLocal.length > 0) {
-    await saveLocalRows(rowsToWriteLocal);
+  if (winners.length > 0) {
+    await config.writeLocal(winners);
+    const upsertResult = await supabaseClient.from(config.name).upsert(winners as unknown[], {
+      onConflict: "id"
+    });
+    if (upsertResult.error) {
+      throw upsertResult.error;
+    }
   }
 };
 
 export const syncWithSupabase = async (userId: string) => {
   if (!navigator.onLine) {
     return {
+      state: "offline_cache_only" as SyncState,
       synced: false,
       detail: "Offline. Sync deferred.",
       at: nowIso()
@@ -59,45 +97,84 @@ export const syncWithSupabase = async (userId: string) => {
   }
 
   try {
-    const [profiles, projects, tasks, contacts, notes, approvals, timeline] = await Promise.all([
-      db.profiles.where("user_id").equals(userId).toArray(),
-      db.projects.where("owner_id").equals(userId).toArray(),
-      db.tasks.toArray(),
-      db.contacts.toArray(),
-      db.notes.where("user_id").equals(userId).toArray(),
-      db.approvals.toArray(),
-      db.timeline.toArray()
-    ]);
+    const tables: TableConfig<SyncableRow>[] = [
+      {
+        name: "profiles",
+        filterColumn: "user_id",
+        readLocal: () => db.profiles.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.profiles.bulkPut(rows as any)
+      },
+      {
+        name: "projects",
+        filterColumn: "owner_id",
+        readLocal: () => db.projects.where("owner_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.projects.bulkPut(rows as any)
+      },
+      {
+        name: "tasks",
+        readLocal: () => db.tasks.toArray(),
+        writeLocal: (rows) => db.tasks.bulkPut(rows as any)
+      },
+      {
+        name: "contacts",
+        readLocal: () => db.contacts.toArray(),
+        writeLocal: (rows) => db.contacts.bulkPut(rows as any)
+      },
+      {
+        name: "notes",
+        filterColumn: "user_id",
+        readLocal: () => db.notes.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.notes.bulkPut(rows as any)
+      },
+      {
+        name: "approvals",
+        readLocal: () => db.approvals.toArray(),
+        writeLocal: (rows) => db.approvals.bulkPut(rows as any)
+      },
+      {
+        name: "timeline",
+        readLocal: () => db.timeline.toArray(),
+        writeLocal: (rows) => db.timeline.bulkPut(rows as any)
+      },
+      {
+        name: "memory",
+        filterColumn: "user_id",
+        readLocal: () => db.memory.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.memory.bulkPut(rows as any)
+      },
+      {
+        name: "conversations",
+        filterColumn: "user_id",
+        readLocal: () => db.conversations.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.conversations.bulkPut(rows as any)
+      },
+      {
+        name: "messages",
+        filterColumn: "user_id",
+        readLocal: () => db.messages.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.messages.bulkPut(rows as any)
+      },
+      {
+        name: "settings",
+        filterColumn: "user_id",
+        readLocal: () => db.settings.where("user_id").equals(userId).toArray(),
+        writeLocal: (rows) => db.settings.bulkPut(rows as any)
+      }
+    ];
 
-    await syncTable("profiles", profiles, async (rows) => {
-      await db.profiles.bulkPut(rows);
-    });
-    await syncTable("projects", projects, async (rows) => {
-      await db.projects.bulkPut(rows);
-    });
-    await syncTable("tasks", tasks, async (rows) => {
-      await db.tasks.bulkPut(rows);
-    });
-    await syncTable("contacts", contacts, async (rows) => {
-      await db.contacts.bulkPut(rows);
-    });
-    await syncTable("notes", notes, async (rows) => {
-      await db.notes.bulkPut(rows);
-    });
-    await syncTable("approvals", approvals, async (rows) => {
-      await db.approvals.bulkPut(rows);
-    });
-    await syncTable("timeline", timeline, async (rows) => {
-      await db.timeline.bulkPut(rows);
-    });
+    for (const table of tables) {
+      await syncTable(table, userId);
+    }
 
     return {
+      state: "synced" as SyncState,
       synced: true,
       detail: "Local cache synced to Supabase (last-write-wins).",
       at: nowIso()
     };
   } catch (error) {
     return {
+      state: "pending_sync" as SyncState,
       synced: false,
       detail: error instanceof Error ? error.message : "Sync failed.",
       at: nowIso()

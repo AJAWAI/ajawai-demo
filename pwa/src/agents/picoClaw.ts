@@ -183,9 +183,16 @@ const parseMemoryRecallFromCommand = (input: string): string | null => {
 };
 
 export class PicoClawManager {
+  private currentUserId: string | null = null;
   private activeConversationSettingKey = "active_conversation_id";
 
+  private settingId(key: string) {
+    const uid = this.currentUserId ?? "anonymous";
+    return `${uid}:${key}`;
+  }
+
   async bootstrap(userId: string) {
+    this.currentUserId = userId;
     const existing = await db.profiles.where("user_id").equals(userId).first();
     if (!existing) {
       const profile: Profile = {
@@ -228,17 +235,40 @@ export class PicoClawManager {
     }
 
     const snapshot: Module3Snapshot = {
-      profiles: await db.profiles.orderBy("updated_at").reverse().toArray(),
-      projects: await db.projects.orderBy("updated_at").reverse().toArray(),
+      profiles: await db.profiles
+        .where("user_id")
+        .equals(this.currentUserId ?? "")
+        .reverse()
+        .sortBy("updated_at"),
+      projects: await db.projects
+        .where("owner_id")
+        .equals(this.currentUserId ?? "")
+        .reverse()
+        .sortBy("updated_at"),
       tasks: await db.tasks.orderBy("updated_at").reverse().toArray(),
       contacts: await db.contacts.orderBy("updated_at").reverse().toArray(),
-      notes: await db.notes.orderBy("updated_at").reverse().toArray(),
+      notes: await db.notes
+        .where("user_id")
+        .equals(this.currentUserId ?? "")
+        .reverse()
+        .sortBy("updated_at"),
       approvals: await db.approvals.orderBy("updated_at").reverse().toArray(),
       timeline: await db.timeline.orderBy("updated_at").reverse().toArray(),
-      memory: await db.memory.orderBy("updated_at").reverse().toArray(),
-      conversations: await db.conversations.orderBy("last_message_at").reverse().toArray(),
+      memory: await db.memory
+        .where("user_id")
+        .equals(this.currentUserId ?? "")
+        .reverse()
+        .sortBy("updated_at"),
+      conversations: await db.conversations
+        .where("user_id")
+        .equals(this.currentUserId ?? "")
+        .reverse()
+        .sortBy("last_message_at"),
       activeConversationId: await this.getActiveConversationId(),
-      messages: await db.messages.orderBy("created_at").toArray()
+      messages: await db.messages
+        .where("user_id")
+        .equals(this.currentUserId ?? "")
+        .toArray()
     };
     localCache.set("module3:snapshot", snapshot, 10_000);
     return snapshot;
@@ -257,6 +287,7 @@ export class PicoClawManager {
   }) {
     await db.messages.put({
       id: crypto.randomUUID(),
+      user_id: this.currentUserId ?? "anonymous",
       conversation_id: input.conversationId,
       role: input.role,
       type: input.type,
@@ -309,6 +340,7 @@ export class PicoClawManager {
   private async getSystemStatusSummary(userId: string) {
     const gmail = await this.getGmailStatus();
     const memoryCount = await db.memory.where("user_id").equals(userId).count();
+    const chatCount = await db.conversations.where("user_id").equals(userId).count();
     const profile = await db.profiles.where("user_id").equals(userId).first();
     const modules = [
       "Secretary Phi",
@@ -324,6 +356,7 @@ export class PicoClawManager {
     const online = navigator.onLine ? "online" : "offline";
     const picoState = "active";
     const memoryState = memoryCount > 0 ? `available (${memoryCount} entries)` : "available (empty)";
+    const syncState = navigator.onLine ? "synced/pending sync (online)" : "offline cache only";
     const userLabel = profile?.full_name || "President";
     return [
       `System is ${online}.`,
@@ -331,17 +364,21 @@ export class PicoClawManager {
       `Available modules: ${modules.join(", ")}.`,
       `Gmail: ${gmail.connected ? "connected" : "not connected"} (${gmail.mode}).`,
       `Local memory: ${memoryState}.`,
+      `Chats: ${chatCount} conversation(s).`,
+      `Sync state: ${syncState}.`,
       `Pico Claw: ${picoState}.`
     ].join(" ");
   }
 
   private async getActiveConversationId() {
-    const setting = await db.settings.get(this.activeConversationSettingKey);
+    const setting = await db.settings.get(this.settingId(this.activeConversationSettingKey));
     return setting?.value ?? null;
   }
 
   private async setActiveConversation(conversationId: string) {
     await db.settings.put({
+      id: this.settingId(this.activeConversationSettingKey),
+      user_id: this.currentUserId ?? "anonymous",
       key: this.activeConversationSettingKey,
       value: conversationId,
       updated_at: nowIso()
@@ -492,12 +529,20 @@ export class PicoClawManager {
     return note;
   }
 
-  async remember(userId: string, key: string, value: string) {
+  async remember(
+    userId: string,
+    key: string,
+    value: string,
+    category = "general",
+    source = "secretary_phi"
+  ) {
     await db.memory.put({
       id: crypto.randomUUID(),
       user_id: userId,
       key,
       value,
+      category,
+      source,
       created_at: nowIso(),
       updated_at: nowIso()
     });
@@ -768,21 +813,26 @@ export class PicoClawManager {
     }
 
     const phiResult = await phiLLM(command);
-    await this.addMessage({
-      conversationId,
-      role: "secretary_phi",
-      type: "assistant",
-      content: phiResult.response
-    });
-
     const forcedMemorySave = parseMemorySaveFromCommand(command);
     const forcedMemoryRecall = parseMemoryRecallFromCommand(command);
     const effectiveIntent =
       phiResult.intent === "general" && forcedMemorySave
-        ? "save_memory"
+        ? "memory_save"
         : phiResult.intent === "general" && forcedMemoryRecall
-          ? "recall_memory"
+          ? "memory_recall"
           : phiResult.intent;
+
+    const sendInterimAck = !["conversational", "memory_recall", "status_query"].includes(
+      effectiveIntent
+    );
+    if (sendInterimAck) {
+      await this.addMessage({
+        conversationId,
+        role: "secretary_phi",
+        type: "assistant",
+        content: phiResult.response
+      });
+    }
 
     let outcome: CommandOutcome = {
       type: "action_completed",
@@ -807,7 +857,7 @@ export class PicoClawManager {
         };
       } else {
         switch (effectiveIntent) {
-          case "create_project": {
+          case "project_request": {
             const projectName = safeText(phiResult.project_name, "Untitled Project");
             const project = await this.createProject(userId, projectName, phiResult.summary);
             await this.addMessage({
@@ -829,7 +879,7 @@ export class PicoClawManager {
             };
             break;
           }
-          case "create_task": {
+          case "task_request": {
             const taskTitle = safeText(phiResult.task_title, "New Task");
             if (phiResult.requires_approval) {
               const approval = await this.createApproval("create_task", {
@@ -882,7 +932,8 @@ export class PicoClawManager {
             }
             break;
           }
-          case "create_contact": {
+          case "contact_request":
+          case "approval_request": {
             const contactName = safeText(phiResult.contact_name, "New Contact");
             const contactEmail = safeText(phiResult.contact_email, "contact@example.com");
             if (phiResult.requires_approval) {
@@ -927,7 +978,7 @@ export class PicoClawManager {
             }
             break;
           }
-          case "create_note": {
+          case "note_request": {
             const note = await this.createNote(
               userId,
               safeText(phiResult.note_title, "President Note"),
@@ -951,10 +1002,10 @@ export class PicoClawManager {
             };
             break;
           }
-          case "save_memory": {
+          case "memory_save": {
             const key = safeText(phiResult.memory_key, forcedMemorySave?.key ?? "note");
             const value = safeText(phiResult.memory_value, forcedMemorySave?.value ?? command);
-            await this.remember(userId, key, value);
+            await this.remember(userId, key, value, "preference", "secretary_phi");
             await this.addMessage({
               conversationId,
               role: "manager_pico",
@@ -969,7 +1020,7 @@ export class PicoClawManager {
             };
             break;
           }
-          case "recall_memory": {
+          case "memory_recall": {
             const query = safeText(phiResult.memory_query, forcedMemoryRecall ?? command);
             const matches = await this.searchMemory(userId, query);
             if (matches.length > 0) {
@@ -997,7 +1048,21 @@ export class PicoClawManager {
             );
             break;
           }
-          case "send_email": {
+          case "integration_request": {
+            if (phiResult.action && phiResult.action !== "send_email") {
+              await this.addMessage({
+                conversationId,
+                role: "manager_pico",
+                type: "system_notice",
+                content: `${MANAGER_NAME} prepared integration action: ${phiResult.action}.`
+              });
+              outcome = {
+                type: "action_completed",
+                ok: true,
+                summary: `Integration action "${phiResult.action}" is prepared.`
+              };
+              break;
+            }
             const to = phiResult.email_to ?? [];
             let subject = phiResult.email_subject;
             let body = phiResult.email_body;
@@ -1056,25 +1121,42 @@ export class PicoClawManager {
             };
             break;
           }
-          default: {
-            await this.logTimeline("command_interpreted", phiResult.summary, null);
+          case "external_action_request": {
             await this.addMessage({
               conversationId,
               role: "manager_pico",
               type: "system_notice",
-              content: `${MANAGER_NAME} organized next steps.`
+              content: `${MANAGER_NAME} prepared external-agent execution path.`
             });
             outcome = {
-              type: "action_completed",
+              type: "approval_required",
               ok: true,
               summary:
-                "I reviewed the request and organized next steps. Tell me what output you want next."
+                "External operation is prepared. I can proceed when you confirm execution details."
+            };
+            break;
+          }
+          case "conversational": {
+            outcome = {
+              type: "informational_answer",
+              ok: true,
+              summary: phiResult.response
+            };
+            break;
+          }
+          default: {
+            await this.logTimeline("command_interpreted", phiResult.summary, null);
+            outcome = {
+              type: "informational_answer",
+              ok: true,
+              summary:
+                "I reviewed the request, but I need more information to execute that action. Tell me the exact outcome you want."
             };
           }
         }
       }
 
-      await this.remember(userId, "last_command", command);
+      await this.remember(userId, "last_command", command, "telemetry", "system");
     } catch (error) {
       outcome = {
         type: "error_failure",

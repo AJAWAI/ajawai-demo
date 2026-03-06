@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { picoClawManager, type Module3Snapshot } from "../agents/picoClaw";
 import { phiSystemStatus } from "../agents/phi";
-import { syncWithSupabase } from "../sync/supabaseSync";
+import { syncWithSupabase, type SyncState as SyncStateType } from "../sync/supabaseSync";
 import { supabase } from "../lib/supabase";
 
 const initialSnapshot: Module3Snapshot = {
@@ -20,6 +20,7 @@ const initialSnapshot: Module3Snapshot = {
 };
 
 interface SyncState {
+  state: SyncStateType;
   synced: boolean;
   detail: string;
   at: string;
@@ -47,6 +48,7 @@ export const useAjawaiSystem = (session: Session) => {
     message: string;
   } | null>(null);
   const prevGmailConnected = useRef<boolean | null>(null);
+  const [pendingSync, setPendingSync] = useState(false);
 
   const refreshSnapshot = useCallback(async () => {
     const next = await picoClawManager.getSnapshot();
@@ -62,9 +64,36 @@ export const useAjawaiSystem = (session: Session) => {
   const syncNow = useCallback(async () => {
     const result = await syncWithSupabase(user.id);
     setSyncState(result);
+    setPendingSync(!result.synced);
     await refreshSnapshot();
     return result;
   }, [refreshSnapshot, user.id]);
+
+  const markPendingSync = useCallback(
+    (reason: string) => {
+      const state: SyncState = {
+        state: navigator.onLine ? "pending_sync" : "offline_cache_only",
+        synced: false,
+        detail: navigator.onLine
+          ? `Pending sync: ${reason}`
+          : `Offline cache only: ${reason}`,
+        at: new Date().toISOString()
+      };
+      setPendingSync(true);
+      setSyncState(state);
+    },
+    []
+  );
+
+  const queueOrSync = useCallback(
+    async (reason: string) => {
+      markPendingSync(reason);
+      if (navigator.onLine) {
+        await syncNow();
+      }
+    },
+    [markPendingSync, syncNow]
+  );
 
   useEffect(() => {
     const initialize = async () => {
@@ -72,20 +101,27 @@ export const useAjawaiSystem = (session: Session) => {
       await picoClawManager.bootstrap(user.id);
       await refreshSnapshot();
       await refreshGmailStatus();
+      if (navigator.onLine) {
+        await syncNow();
+      } else {
+        markPendingSync("Offline startup");
+      }
       setBusy(false);
     };
 
     void initialize();
-  }, [refreshGmailStatus, refreshSnapshot, user.id]);
+  }, [markPendingSync, refreshGmailStatus, refreshSnapshot, syncNow, user.id]);
 
   useEffect(() => {
     const onOnline = () => {
-      void syncNow();
+      if (pendingSync) {
+        void syncNow();
+      }
       void refreshGmailStatus();
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
-  }, [refreshGmailStatus, syncNow]);
+  }, [pendingSync, refreshGmailStatus, syncNow]);
 
   useEffect(() => {
     if (prevGmailConnected.current === false && gmailStatus.connected) {
@@ -106,11 +142,12 @@ export const useAjawaiSystem = (session: Session) => {
       try {
         await picoClawManager.executeSecretaryCommand(user.id, conversationId, command);
         await refreshSnapshot();
+        await queueOrSync("New chat interaction");
       } finally {
         setBusy(false);
       }
     },
-    [refreshSnapshot, user.id]
+    [queueOrSync, refreshSnapshot, user.id]
   );
 
   const approve = useCallback(
@@ -140,11 +177,12 @@ export const useAjawaiSystem = (session: Session) => {
         }
         await refreshSnapshot();
         await refreshGmailStatus();
+        await queueOrSync("Approval update");
       } finally {
         setBusy(false);
       }
     },
-    [refreshGmailStatus, refreshSnapshot]
+    [queueOrSync, refreshGmailStatus, refreshSnapshot]
   );
 
   const reject = useCallback(
@@ -157,11 +195,12 @@ export const useAjawaiSystem = (session: Session) => {
           message: result.message
         });
         await refreshSnapshot();
+        await queueOrSync("Approval rejection update");
       } finally {
         setBusy(false);
       }
     },
-    [refreshSnapshot]
+    [queueOrSync, refreshSnapshot]
   );
 
   const connectGmail = useCallback(async () => {
@@ -185,18 +224,20 @@ export const useAjawaiSystem = (session: Session) => {
     try {
       const conversation = await picoClawManager.createConversation(user.id);
       await refreshSnapshot();
+      await queueOrSync("New conversation");
       return conversation.id;
     } finally {
       setBusy(false);
     }
-  }, [refreshSnapshot, user.id]);
+  }, [queueOrSync, refreshSnapshot, user.id]);
 
   const selectConversation = useCallback(
     async (conversationId: string) => {
       await picoClawManager.selectConversation(conversationId);
       await refreshSnapshot();
+      await queueOrSync("Conversation selection settings");
     },
-    [refreshSnapshot]
+    [queueOrSync, refreshSnapshot]
   );
 
   const activeConversationId = snapshot.activeConversationId ?? snapshot.conversations[0]?.id ?? null;
@@ -220,6 +261,7 @@ export const useAjawaiSystem = (session: Session) => {
     busy,
     snapshot,
     syncState,
+    pendingSync,
     gmailStatus,
     phiStatus,
     toast,
