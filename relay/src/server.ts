@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { z } from "zod";
 import { getConfig } from "./config";
 import { getGmailConnectUrl, hasGmailConnection, sendEmailViaGmail } from "./gmail";
+import { runWebSearch } from "./webSearch";
 
 const config = getConfig();
 
@@ -10,6 +11,10 @@ const sendEmailBodySchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1),
   body: z.string().min(1)
+});
+
+const webSearchQuerySchema = z.object({
+  q: z.string().min(2)
 });
 
 const gmailWebhookSchema = z
@@ -67,6 +72,31 @@ app.get("/gmail/connect-url", async (_request, reply) => {
     ok: true,
     connect_url: connectUrl
   };
+});
+
+app.get("/search/web", async (request, reply) => {
+  const parsed = webSearchQuerySchema.safeParse(request.query);
+  if (!parsed.success) {
+    return reply.status(400).send({
+      ok: false,
+      error: "Invalid query parameter. Provide ?q=<search terms>.",
+      issues: parsed.error.issues
+    });
+  }
+
+  try {
+    const results = await runWebSearch(parsed.data.q);
+    return {
+      ok: true,
+      ...results
+    };
+  } catch (error) {
+    request.log.error({ err: error }, "web search failed");
+    return reply.status(502).send({
+      ok: false,
+      error: error instanceof Error ? error.message : "Web search failed."
+    });
+  }
 });
 
 app.post("/send/email", async (request, reply) => {

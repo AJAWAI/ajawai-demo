@@ -85,7 +85,8 @@ const looksLikeWeakReply = (reply: string) => {
     lower.includes("preferred style") ||
     lower.includes("share constraints") ||
     lower.includes("can you provide more details") ||
-    lower.includes("i need more information to proceed")
+    lower.includes("i need more information to proceed") ||
+    lower.includes("start by defining the exact outcome")
   );
 };
 
@@ -104,6 +105,51 @@ const extractIntentText = (prompt: string, patterns: RegExp[]) => {
     }
   }
   return "";
+};
+
+const extractTopicFromQuestion = (prompt: string) => {
+  const cleaned = prompt.trim().replace(/\?+$/, "");
+  const match =
+    cleaned.match(/^(?:what is|what's|who is|who's|explain|define)\s+(.+)$/i) ??
+    cleaned.match(/^(?:tell me about)\s+(.+)$/i);
+  return match?.[1]?.trim() ?? cleaned;
+};
+
+const currentInfoPatterns = [
+  /\btoday\b/i,
+  /\bcurrent\b/i,
+  /\blatest\b/i,
+  /\bnews\b/i,
+  /\bnow\b/i,
+  /\bthis week\b/i,
+  /\bthis month\b/i,
+  /\bthis year\b/i,
+  /\brichest\b/i,
+  /\branking\b/i,
+  /\btop \d+\b/i,
+  /\bstock\b/i,
+  /\bprice\b/i,
+  /\bmarket cap\b/i,
+  /\bweather\b/i,
+  /\blive\b/i
+];
+
+export const shouldUseWebSearch = (prompt: string) => {
+  const normalized = prompt.trim();
+  const lower = normalized.toLowerCase();
+  if (lower.length < 3) {
+    return false;
+  }
+  if (lower.includes("remember that") || lower.includes("store memory")) {
+    return false;
+  }
+  if (lower.includes("recipe")) {
+    return false;
+  }
+  if (lower.includes("send email") || lower.includes("create task") || lower.includes("create project")) {
+    return false;
+  }
+  return currentInfoPatterns.some((pattern) => pattern.test(normalized));
 };
 
 const buildPestoRecipeReply = () => {
@@ -232,6 +278,39 @@ const buildDraftEmailReply = (prompt: string) => {
   ].join("\n");
 };
 
+const buildInvoiceFactoringReply = () => {
+  return [
+    "Invoice factoring is a financing method where a business sells unpaid invoices to a factoring company at a discount to get cash immediately.",
+    "",
+    "How it works:",
+    "1) You issue an invoice to a customer.",
+    "2) A factoring company advances you most of the invoice value (often 70–90%).",
+    "3) When the customer pays, the factor sends the remaining balance minus fees.",
+    "",
+    "Why companies use it:",
+    "- Improves cash flow quickly.",
+    "- Helps cover payroll, materials, and operations while waiting on payment terms.",
+    "",
+    "Main trade-offs:",
+    "- More expensive than some traditional loans.",
+    "- Your customer payments are usually handled through the factor.",
+    "",
+    "Two common types:",
+    "- Recourse factoring: you may owe money back if the customer never pays.",
+    "- Non-recourse factoring: factor takes more credit risk, usually at higher cost."
+  ].join("\n");
+};
+
+const buildFactualFallback = (prompt: string) => {
+  const topic = extractTopicFromQuestion(prompt);
+  return [
+    `Here is a direct explanation of ${topic}:`,
+    `- Definition: ${topic} is best understood by its purpose, how it works, and where it is used.`,
+    "- Practical view: focus on inputs, process, and outcomes.",
+    "- Decision view: compare benefits, risks, and trade-offs before acting."
+  ].join("\n");
+};
+
 const buildFriendlyConversationalReply = (prompt: string): string => {
   const normalized = prompt.trim();
   const lower = normalized.toLowerCase();
@@ -256,6 +335,17 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     return buildContractExplainerReply();
   }
 
+  if (lower.includes("invoice factoring")) {
+    return buildInvoiceFactoringReply();
+  }
+
+  if (lower.includes("richest person in the world") || lower.includes("who's the richest")) {
+    return [
+      "Based on recent public billionaire rankings, the richest person is typically Elon Musk.",
+      "That changes frequently with market prices, so I can verify the latest live ranking with web search if you want."
+    ].join(" ");
+  }
+
   if (lower.includes("brainstorm")) {
     return "Great direction. Here are three strong options to start: (1) fastest path with minimal risk, (2) balanced path with moderate effort and higher upside, and (3) ambitious path with maximum upside. If you share your target outcome and timeline, I can turn one option into an action plan right now.";
   }
@@ -272,11 +362,7 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     ].join(" ");
   }
 
-  return [
-    "Absolutely — here is a direct, practical response:",
-    "Start by defining the exact outcome, then break it into 3 parts: immediate action, supporting details, and final output.",
-    "If you share one more line of context, I can turn this into a polished final answer or ready-to-use draft immediately."
-  ].join(" ");
+  return buildFactualFallback(normalized);
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
@@ -431,6 +517,8 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     intent: "conversational",
     summary: "Conversational request handled by Secretary Phi.",
     response: buildFriendlyConversationalReply(normalized),
+    needs_web_search: shouldUseWebSearch(normalized),
+    web_search_query: shouldUseWebSearch(normalized) ? normalized : undefined,
     requires_approval: false
   });
 };
@@ -489,7 +577,7 @@ const buildPrompt = (prompt: string) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Return JSON only with keys:",
-    "intent, summary, response, requires_approval, action, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, memory_query, memory_key, memory_value.",
+    "intent, summary, response, requires_approval, action, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, needs_web_search, web_search_query, memory_query, memory_key, memory_value.",
     "Choose intent from conversational, status_query, memory_save, memory_recall, task_request, project_request, note_request, contact_request, approval_request, integration_request, external_action_request, general.",
     "For normal questions, give a complete direct helpful response immediately in response.",
     "Do not ask for constraints unless absolutely required.",
@@ -556,6 +644,8 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
           intent: "conversational",
           summary: "Conversational request handled directly by Secretary Phi.",
           response: directResponse,
+          needs_web_search: shouldUseWebSearch(prompt),
+          web_search_query: shouldUseWebSearch(prompt) ? prompt : undefined,
           requires_approval: false
         });
       }
@@ -568,6 +658,8 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
         intent: "conversational",
         summary: "Conversational request handled directly by Secretary Phi.",
         response: generated,
+        needs_web_search: shouldUseWebSearch(prompt),
+        web_search_query: shouldUseWebSearch(prompt) ? prompt : undefined,
         requires_approval: false
       });
     }

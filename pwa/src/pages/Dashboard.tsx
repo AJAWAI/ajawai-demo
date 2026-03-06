@@ -27,16 +27,19 @@ export default function Dashboard({ session }: DashboardProps) {
 
   const {
     user,
-    busy,
     snapshot,
     syncState,
     pendingSync,
     gmailStatus,
     phiStatus,
     toast,
+    thinking,
+    chatError,
     activeConversationId,
     activeConversationMessages,
     runCommand,
+    retryLastCommand,
+    resetThinkingState,
     approve,
     reject,
     syncNow,
@@ -61,6 +64,7 @@ export default function Dashboard({ session }: DashboardProps) {
       ? "pending sync"
       : "offline cache only";
   const syncDebugDetail = syncState?.detail ?? "Waiting for next sync cycle.";
+  const syncDebugAt = syncState ? new Date(syncState.at).toLocaleTimeString() : "not yet";
 
   useEffect(() => {
     const thread = chatThreadRef.current;
@@ -115,6 +119,30 @@ export default function Dashboard({ session }: DashboardProps) {
   };
 
   const renderMessageCard = (message: (typeof activeConversationMessages)[number]) => {
+    const payload = message.payload ?? {};
+    const sources = Array.isArray(payload.sources)
+      ? payload.sources.filter(
+          (entry): entry is { title: string; url: string; source?: string } =>
+            Boolean(
+              entry &&
+                typeof entry === "object" &&
+                typeof (entry as { title?: string }).title === "string" &&
+                typeof (entry as { url?: string }).url === "string"
+            )
+        )
+      : [];
+    const images = Array.isArray(payload.images)
+      ? payload.images.filter(
+          (entry): entry is { title: string; image_url: string; source_url: string } =>
+            Boolean(
+              entry &&
+                typeof entry === "object" &&
+                typeof (entry as { image_url?: string }).image_url === "string" &&
+                typeof (entry as { source_url?: string }).source_url === "string"
+            )
+        )
+      : [];
+
     if (message.type === "assistant") {
       return (
         <article className="chat-message assistant" key={message.id}>
@@ -140,6 +168,40 @@ export default function Dashboard({ session }: DashboardProps) {
         <article className={`chat-message assistant secretary ${message.type}`} key={message.id}>
           <span className="chat-role">{SECRETARY_NAME}</span>
           <p>{message.content}</p>
+          {sources.length > 0 && (
+            <div className="chat-sources">
+              <strong>Sources</strong>
+              <ul>
+                {sources.map((source, index) => (
+                  <li key={`${message.id}-source-${index}`}>
+                    <a href={source.url} target="_blank" rel="noreferrer">
+                      {source.title}
+                    </a>
+                    {source.source ? <small>{source.source}</small> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {images.length > 0 && (
+            <div className="chat-images">
+              <strong>Image results</strong>
+              <div className="chat-image-grid">
+                {images.map((image, index) => (
+                  <a
+                    key={`${message.id}-img-${index}`}
+                    href={image.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="chat-image-card"
+                  >
+                    <img src={image.image_url} alt={image.title} loading="lazy" />
+                    <span>{image.title}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
         </article>
       );
     }
@@ -273,7 +335,9 @@ export default function Dashboard({ session }: DashboardProps) {
           <span>Sync: {syncDebugLabel}</span>
           <span>Memory: {snapshot.memory.length}</span>
           <span>Conversations: {snapshot.conversations.length}</span>
-          <small>{syncDebugDetail}</small>
+          <small>
+            Last sync: {syncDebugAt} • {syncDebugDetail}
+          </small>
         </article>
 
         {toast && (
@@ -299,6 +363,24 @@ export default function Dashboard({ session }: DashboardProps) {
             </article>
 
             <form className="chat-composer" onSubmit={submitCommand}>
+              {chatError && (
+                <article className="chat-error-banner">
+                  <p>{chatError.message}</p>
+                  <small>{new Date(chatError.at).toLocaleTimeString()}</small>
+                  <div className="os-row">
+                    <button
+                      className="os-button teal"
+                      type="button"
+                      onClick={() => void retryLastCommand()}
+                    >
+                      Retry
+                    </button>
+                    <button className="os-button ghost" type="button" onClick={resetThinkingState}>
+                      Clear
+                    </button>
+                  </div>
+                </article>
+              )}
               <textarea
                 className="os-input"
                 rows={2}
@@ -306,9 +388,20 @@ export default function Dashboard({ session }: DashboardProps) {
                 value={command}
                 onChange={(event) => setCommand(event.target.value)}
               />
-              <button className="os-button gold" type="submit" disabled={busy || !activeConversationId}>
-                {busy ? "Thinking..." : "Send"}
-              </button>
+              <div className="os-row">
+                <button
+                  className="os-button gold"
+                  type="submit"
+                  disabled={thinking || !activeConversationId}
+                >
+                  {thinking ? "Thinking..." : "Send"}
+                </button>
+                {thinking && (
+                  <button className="os-button ghost" type="button" onClick={resetThinkingState}>
+                    Reset
+                  </button>
+                )}
+              </div>
             </form>
           </div>
         )}

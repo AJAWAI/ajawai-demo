@@ -27,6 +27,23 @@ interface SyncState {
 }
 
 const toUser = (session: Session): User => session.user;
+const REQUEST_TIMEOUT_MS = 45_000;
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) => {
+  let timer: number | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+    }
+  }
+};
 
 export const useAjawaiSystem = (session: Session) => {
   const user = useMemo(() => toUser(session), [session]);
@@ -49,6 +66,15 @@ export const useAjawaiSystem = (session: Session) => {
   } | null>(null);
   const prevGmailConnected = useRef<boolean | null>(null);
   const [pendingSync, setPendingSync] = useState(false);
+  const [thinking, setThinking] = useState(false);
+  const [chatError, setChatError] = useState<{
+    message: string;
+    command: string;
+    conversationId: string;
+    at: string;
+  } | null>(null);
+  const activeRunId = useRef<number | null>(null);
+  const runCounter = useRef(0);
 
   const refreshSnapshot = useCallback(async () => {
     const next = await picoClawManager.getSnapshot();
@@ -62,11 +88,23 @@ export const useAjawaiSystem = (session: Session) => {
   }, []);
 
   const syncNow = useCallback(async () => {
-    const result = await syncWithSupabase(user.id);
-    setSyncState(result);
-    setPendingSync(!result.synced);
-    await refreshSnapshot();
-    return result;
+    try {
+      const result = await syncWithSupabase(user.id);
+      setSyncState(result);
+      setPendingSync(!result.synced);
+      await refreshSnapshot();
+      return result;
+    } catch (error) {
+      const failureState: SyncState = {
+        state: "sync_failed",
+        synced: false,
+        detail: error instanceof Error ? error.message : "Sync failed unexpectedly.",
+        at: new Date().toISOString()
+      };
+      setSyncState(failureState);
+      setPendingSync(true);
+      return failureState;
+    }
   }, [refreshSnapshot, user.id]);
 
   const markPendingSync = useCallback(
@@ -98,20 +136,31 @@ export const useAjawaiSystem = (session: Session) => {
   useEffect(() => {
     const initialize = async () => {
       setBusy(true);
-      if (navigator.onLine) {
-        const preloadSync = await syncWithSupabase(user.id);
-        setSyncState(preloadSync);
-        setPendingSync(!preloadSync.synced);
+      try {
+        if (navigator.onLine) {
+          const preloadSync = await syncWithSupabase(user.id);
+          setSyncState(preloadSync);
+          setPendingSync(!preloadSync.synced);
+        }
+        await picoClawManager.bootstrap(user.id);
+        await refreshSnapshot();
+        await refreshGmailStatus();
+        if (navigator.onLine) {
+          await syncNow();
+        } else {
+          markPendingSync("Offline startup");
+        }
+      } catch (error) {
+        setToast({
+          kind: "error",
+          message:
+            error instanceof Error
+              ? `Initialization issue: ${error.message}`
+              : "Initialization issue."
+        });
+      } finally {
+        setBusy(false);
       }
-      await picoClawManager.bootstrap(user.id);
-      await refreshSnapshot();
-      await refreshGmailStatus();
-      if (navigator.onLine) {
-        await syncNow();
-      } else {
-        markPendingSync("Offline startup");
-      }
-      setBusy(false);
     };
 
     void initialize();
@@ -152,17 +201,58 @@ export const useAjawaiSystem = (session: Session) => {
       if (!command.trim()) {
         return;
       }
+      const nextRunId = ++runCounter.current;
+      activeRunId.current = nextRunId;
+      setChatError(null);
+      setThinking(true);
       setBusy(true);
       try {
-        await picoClawManager.executeSecretaryCommand(user.id, conversationId, command);
+        await withTimeout(
+          picoClawManager.executeSecretaryCommand(user.id, conversationId, command),
+          REQUEST_TIMEOUT_MS,
+          "Request timed out. Please retry."
+        );
+        if (activeRunId.current !== nextRunId) {
+          return;
+        }
         await refreshSnapshot();
-        await queueOrSync("New chat interaction");
+        await queueOrSync("New chat interaction").catch(() => undefined);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Request failed. Please retry your message.";
+        setChatError({
+          message,
+          command,
+          conversationId,
+          at: new Date().toISOString()
+        });
+        setToast({
+          kind: "error",
+          message
+        });
       } finally {
+        if (activeRunId.current === nextRunId) {
+          activeRunId.current = null;
+        }
+        setThinking(false);
         setBusy(false);
       }
     },
     [queueOrSync, refreshSnapshot, user.id]
   );
+
+  const resetThinkingState = useCallback(() => {
+    activeRunId.current = null;
+    setThinking(false);
+    setBusy(false);
+  }, []);
+
+  const retryLastCommand = useCallback(async () => {
+    if (!chatError) {
+      return;
+    }
+    await runCommand(chatError.command, chatError.conversationId);
+  }, [chatError, runCommand]);
 
   const approve = useCallback(
     async (approvalId: string, conversationId: string) => {
@@ -311,9 +401,13 @@ export const useAjawaiSystem = (session: Session) => {
     gmailStatus,
     phiStatus,
     toast,
+    thinking,
+    chatError,
     activeConversationId,
     activeConversationMessages,
     runCommand,
+    retryLastCommand,
+    resetThinkingState,
     approve,
     reject,
     syncNow,
