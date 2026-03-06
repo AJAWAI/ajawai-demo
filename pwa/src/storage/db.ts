@@ -46,6 +46,7 @@ export interface AgentMessage {
   content: string;
   payload?: Record<string, unknown>;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface LocalSetting {
@@ -91,6 +92,19 @@ class AjawaiDb extends Dexie {
       memory: "id, user_id, key, updated_at",
       conversations: "id, user_id, last_message_at, updated_at",
       messages: "id, user_id, conversation_id, role, type, created_at",
+      settings: "id, user_id, key, updated_at"
+    });
+    this.version(6).stores({
+      profiles: "id, user_id, updated_at",
+      projects: "id, owner_id, status, updated_at",
+      tasks: "id, project_id, status, priority, requires_approval, updated_at",
+      contacts: "id, email, project_id, updated_at",
+      notes: "id, user_id, project_id, updated_at",
+      approvals: "id, action_type, status, updated_at",
+      timeline: "id, event_type, project_id, updated_at",
+      memory: "id, user_id, key, [user_id+key], updated_at",
+      conversations: "id, user_id, last_message_at, updated_at",
+      messages: "id, user_id, conversation_id, role, type, created_at, updated_at",
       settings: "id, user_id, key, updated_at"
     });
   }

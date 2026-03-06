@@ -125,6 +125,30 @@ const safeText = (value: string | undefined, fallback: string) => {
   return value && value.trim().length > 0 ? value.trim() : fallback;
 };
 
+const sortByDateDesc = <T>(rows: T[], readDate: (row: T) => string) => {
+  return [...rows].sort((a, b) => {
+    const delta = Date.parse(readDate(b)) - Date.parse(readDate(a));
+    if (delta !== 0) {
+      return delta;
+    }
+    const aId = (a as { id?: string }).id ?? "";
+    const bId = (b as { id?: string }).id ?? "";
+    return aId.localeCompare(bId);
+  });
+};
+
+const sortByDateAsc = <T>(rows: T[], readDate: (row: T) => string) => {
+  return [...rows].sort((a, b) => {
+    const delta = Date.parse(readDate(a)) - Date.parse(readDate(b));
+    if (delta !== 0) {
+      return delta;
+    }
+    const aId = (a as { id?: string }).id ?? "";
+    const bId = (b as { id?: string }).id ?? "";
+    return aId.localeCompare(bId);
+  });
+};
+
 const isStatusRequest = (command: string) => {
   const normalized = command.toLowerCase();
   return (
@@ -212,19 +236,6 @@ export class PicoClawManager {
     const activeConversationId = await this.ensureActiveConversation(userId);
     const profile = await db.profiles.where("user_id").equals(userId).first();
 
-    const hasMessages = await db.messages
-      .where("conversation_id")
-      .equals(activeConversationId)
-      .count();
-    if (hasMessages === 0) {
-      await this.addMessage({
-        conversationId: activeConversationId,
-        role: "manager_pico",
-        type: "system_notice",
-        content: `${MANAGER_NAME} organized next steps.`
-      });
-    }
-
     return profile!;
   }
 
@@ -234,41 +245,32 @@ export class PicoClawManager {
       return cached;
     }
 
+    const profiles = await db.profiles.where("user_id").equals(this.currentUserId ?? "").toArray();
+    const projects = await db.projects.where("owner_id").equals(this.currentUserId ?? "").toArray();
+    const tasks = await db.tasks.toArray();
+    const contacts = await db.contacts.toArray();
+    const notes = await db.notes.where("user_id").equals(this.currentUserId ?? "").toArray();
+    const approvals = await db.approvals.toArray();
+    const timeline = await db.timeline.toArray();
+    const memory = await db.memory.where("user_id").equals(this.currentUserId ?? "").toArray();
+    const conversations = await db.conversations
+      .where("user_id")
+      .equals(this.currentUserId ?? "")
+      .toArray();
+    const messages = await db.messages.where("user_id").equals(this.currentUserId ?? "").toArray();
+
     const snapshot: Module3Snapshot = {
-      profiles: await db.profiles
-        .where("user_id")
-        .equals(this.currentUserId ?? "")
-        .reverse()
-        .sortBy("updated_at"),
-      projects: await db.projects
-        .where("owner_id")
-        .equals(this.currentUserId ?? "")
-        .reverse()
-        .sortBy("updated_at"),
-      tasks: await db.tasks.orderBy("updated_at").reverse().toArray(),
-      contacts: await db.contacts.orderBy("updated_at").reverse().toArray(),
-      notes: await db.notes
-        .where("user_id")
-        .equals(this.currentUserId ?? "")
-        .reverse()
-        .sortBy("updated_at"),
-      approvals: await db.approvals.orderBy("updated_at").reverse().toArray(),
-      timeline: await db.timeline.orderBy("updated_at").reverse().toArray(),
-      memory: await db.memory
-        .where("user_id")
-        .equals(this.currentUserId ?? "")
-        .reverse()
-        .sortBy("updated_at"),
-      conversations: await db.conversations
-        .where("user_id")
-        .equals(this.currentUserId ?? "")
-        .reverse()
-        .sortBy("last_message_at"),
+      profiles: sortByDateDesc(profiles, (row) => row.updated_at),
+      projects: sortByDateDesc(projects, (row) => row.updated_at),
+      tasks: sortByDateDesc(tasks, (row) => row.updated_at),
+      contacts: sortByDateDesc(contacts, (row) => row.updated_at),
+      notes: sortByDateDesc(notes, (row) => row.updated_at),
+      approvals: sortByDateDesc(approvals, (row) => row.updated_at),
+      timeline: sortByDateDesc(timeline, (row) => row.updated_at),
+      memory: sortByDateDesc(memory, (row) => row.updated_at),
+      conversations: sortByDateDesc(conversations, (row) => row.last_message_at),
       activeConversationId: await this.getActiveConversationId(),
-      messages: await db.messages
-        .where("user_id")
-        .equals(this.currentUserId ?? "")
-        .toArray()
+      messages: sortByDateAsc(messages, (row) => row.created_at)
     };
     localCache.set("module3:snapshot", snapshot, 10_000);
     return snapshot;
@@ -285,6 +287,7 @@ export class PicoClawManager {
     content: string;
     payload?: Record<string, unknown>;
   }) {
+    const createdAt = nowIso();
     await db.messages.put({
       id: crypto.randomUUID(),
       user_id: this.currentUserId ?? "anonymous",
@@ -293,11 +296,12 @@ export class PicoClawManager {
       type: input.type,
       content: input.content,
       payload: input.payload,
-      created_at: nowIso()
+      created_at: createdAt,
+      updated_at: createdAt
     });
     await db.conversations.update(input.conversationId, {
-      updated_at: nowIso(),
-      last_message_at: nowIso()
+      updated_at: createdAt,
+      last_message_at: createdAt
     });
     this.invalidateSnapshot();
   }
@@ -322,18 +326,18 @@ export class PicoClawManager {
       case "informational_answer":
         return outcome.summary;
       case "project_created":
-        return `${SECRETARY_NAME}: Project created successfully. ${outcome.summary}`;
+        return `Project created successfully. ${outcome.summary}`;
       case "task_created":
-        return `${SECRETARY_NAME}: Task created and ready. ${outcome.summary}`;
+        return `Task created and ready. ${outcome.summary}`;
       case "memory_saved":
-        return `${SECRETARY_NAME}: Memory has been saved locally. ${outcome.summary}`;
+        return `Got it — memory saved. ${outcome.summary}`;
       case "approval_required":
-        return `${SECRETARY_NAME}: ${outcome.summary} The action is queued and awaiting your approval.`;
+        return `${outcome.summary} The action is queued and awaiting your approval.`;
       case "error_failure":
-        return `${SECRETARY_NAME}: ${outcome.summary}`;
+        return `I hit an issue: ${outcome.summary}`;
       case "action_completed":
       default:
-        return `${SECRETARY_NAME}: ${outcome.summary}`;
+        return outcome.summary;
     }
   }
 
@@ -415,10 +419,16 @@ export class PicoClawManager {
       }
     }
 
-    const existingForUser = await db.conversations.where("user_id").equals(userId).first();
-    if (existingForUser) {
-      await this.setActiveConversation(existingForUser.id);
-      return existingForUser.id;
+    const existingForUser = await db.conversations
+      .where("user_id")
+      .equals(userId)
+      .sortBy("last_message_at");
+    if (existingForUser.length > 0) {
+      const latestConversation = existingForUser[existingForUser.length - 1];
+      if (latestConversation) {
+        await this.setActiveConversation(latestConversation.id);
+        return latestConversation.id;
+      }
     }
 
     const conversation = await this.createConversation(userId, "New Chat");
@@ -536,15 +546,20 @@ export class PicoClawManager {
     category = "general",
     source = "secretary_phi"
   ) {
+    const normalizedKey = normalizeMemoryKey(key);
+    const rows = await db.memory.where("user_id").equals(userId).toArray();
+    const existing = rows.find((row) => row.key === normalizedKey);
+
+    const timestamp = nowIso();
     await db.memory.put({
-      id: crypto.randomUUID(),
+      id: existing?.id ?? crypto.randomUUID(),
       user_id: userId,
-      key,
+      key: normalizedKey,
       value,
       category,
       source,
-      created_at: nowIso(),
-      updated_at: nowIso()
+      created_at: existing?.created_at ?? timestamp,
+      updated_at: timestamp
     });
     await this.logTimeline("memory_saved", `Memory saved for "${key}"`, null);
   }
@@ -552,8 +567,14 @@ export class PicoClawManager {
   async searchMemory(userId: string, query: string) {
     const rows = await db.memory.where("user_id").equals(userId).toArray();
     rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    const q = query.toLowerCase();
-    return rows.filter((item) => item.key.toLowerCase().includes(q) || item.value.toLowerCase().includes(q));
+    const q = normalizeMemoryKey(query);
+    const exactKey = rows.filter((item) => item.key === q);
+    if (exactKey.length > 0) {
+      return exactKey;
+    }
+    return rows.filter(
+      (item) => item.key.toLowerCase().includes(q) || item.value.toLowerCase().includes(q)
+    );
   }
 
   private async createApproval(actionType: string, payload: Record<string, unknown>) {
@@ -821,18 +842,6 @@ export class PicoClawManager {
         : phiResult.intent === "general" && forcedMemoryRecall
           ? "memory_recall"
           : phiResult.intent;
-
-    const sendInterimAck = !["conversational", "memory_recall", "status_query"].includes(
-      effectiveIntent
-    );
-    if (sendInterimAck) {
-      await this.addMessage({
-        conversationId,
-        role: "secretary_phi",
-        type: "assistant",
-        content: phiResult.response
-      });
-    }
 
     let outcome: CommandOutcome = {
       type: "action_completed",
