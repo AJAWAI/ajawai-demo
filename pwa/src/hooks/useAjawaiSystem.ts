@@ -242,6 +242,7 @@ export const useAjawaiSystem = (session: Session) => {
           search_used: false,
           pico_used: false,
           memory_used: false,
+          llm_called: false,
           fallback_triggered: false,
           template_fallback_used: false,
           quality_guard_triggered: false,

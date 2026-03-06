@@ -94,6 +94,7 @@ export interface CommandDebugInfo {
   search_used: boolean;
   pico_used: boolean;
   memory_used: boolean;
+  llm_called: boolean;
   fallback_triggered: boolean;
   template_fallback_used: boolean;
   quality_guard_triggered: boolean;
@@ -1145,6 +1146,7 @@ export class PicoClawManager {
       search_used: false,
       pico_used: false,
       memory_used: contextualMemory.length > 0,
+      llm_called: phiDebug.llmCalled,
       fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "heuristic",
       template_fallback_used: false,
       quality_guard_triggered: false,
@@ -1606,7 +1608,10 @@ export class PicoClawManager {
     return {
       ...phiResult,
       response: finalResponse,
-      debug
+      debug: {
+        ...debug,
+        llm_called: getLastPhiDebugMeta().llmCalled || debug.llm_called
+      }
     };
   }
 

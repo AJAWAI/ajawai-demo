@@ -695,7 +695,7 @@ export default function Dashboard({ session }: DashboardProps) {
                     </p>
                     <small>
                       search={trace.search_used ? "yes" : "no"} • pico={trace.pico_used ? "yes" : "no"} •
-                      memory={trace.memory_used ? "yes" : "no"} • fallback=
+                      memory={trace.memory_used ? "yes" : "no"} • llm={trace.llm_called ? "yes" : "no"} • fallback=
                       {trace.fallback_triggered ? "yes" : "no"} • template_fallback=
                       {trace.template_fallback_used ? "yes" : "no"} • quality_guard=
                       {trace.quality_guard_triggered ? "yes" : "no"} •{" "}

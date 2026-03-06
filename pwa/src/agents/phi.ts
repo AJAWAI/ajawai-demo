@@ -31,6 +31,7 @@ export interface PhiDebugMeta {
   mode: "heuristic" | "model" | "model_with_fallback";
   usedWeakRepair: boolean;
   usedSearchHeuristic: boolean;
+  llmCalled: boolean;
   normalizedPrompt: string;
   checkedAt: string;
 }
@@ -48,6 +49,7 @@ let lastPhiDebugMeta: PhiDebugMeta = {
   mode: "heuristic",
   usedWeakRepair: false,
   usedSearchHeuristic: false,
+  llmCalled: false,
   normalizedPrompt: "",
   checkedAt: now()
 };
@@ -248,39 +250,6 @@ const normalizeTranslationPhrase = (value: string) => {
     .trim();
 };
 
-const translationDictionary: Record<SupportedTranslationLanguage, Record<string, string>> = {
-  spanish: {
-    "how are you": "¿Cómo estás?",
-    "what did you do today": "¿Qué hiciste hoy?",
-    "where are you from": "¿De dónde eres?",
-    "what are you doing": "¿Qué estás haciendo?",
-    "good morning": "Buenos días.",
-    "see you tomorrow": "Hasta mañana.",
-    "how is your mom": "¿Cómo está tu mamá?",
-    "how is your mother": "¿Cómo está tu madre?"
-  },
-  french: {
-    "how are you": "Comment ça va ?",
-    "what did you do today": "Qu’as-tu fait aujourd’hui ?",
-    "where are you from": "D’où viens-tu ?",
-    "what are you doing": "Que fais-tu ?",
-    "good morning": "Bonjour.",
-    "see you tomorrow": "À demain.",
-    "how is your mom": "Comment va ta maman ?",
-    "how is your mother": "Comment va votre mère ?"
-  },
-  english: {
-    "como estas": "How are you?",
-    "qué hiciste hoy": "What did you do today?",
-    "de donde eres": "Where are you from?",
-    "que estas haciendo": "What are you doing?",
-    "buenos dias": "Good morning.",
-    "hasta manana": "See you tomorrow.",
-    "bonjour": "Good morning.",
-    "a demain": "See you tomorrow."
-  }
-};
-
 const detectTargetLanguage = (prompt: string): SupportedTranslationLanguage | null => {
   const lower = prompt.toLowerCase();
   let bestMatch: { index: number; language: SupportedTranslationLanguage } | null = null;
@@ -381,15 +350,6 @@ export const parseTranslationIntent = (prompt: string): TranslationIntent | null
     targetLanguage,
     phrases
   };
-};
-
-const translatePhraseFromDictionary = (
-  phrase: string,
-  targetLanguage: SupportedTranslationLanguage
-) => {
-  const normalized = normalizeTranslationPhrase(phrase);
-  const dictionary = translationDictionary[targetLanguage];
-  return dictionary?.[normalized] ?? null;
 };
 
 const languageLabel = (language: SupportedTranslationLanguage) => {
@@ -794,7 +754,7 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
   }
 
   const topic = extractTopicFromQuestion(normalized);
-  return `Great question. Here is a practical answer about ${topic}: start with the core objective, break it into clear steps, and execute the first small action today.`;
+  return `I can help with ${topic}.`;
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
@@ -1132,12 +1092,18 @@ export const phiTranslateRequest = async (
 
   const translatedRows: Array<{ source: string; translated: string }> = [];
   for (const phrase of parsed.phrases.slice(0, 8)) {
-    const fromDictionary = translatePhraseFromDictionary(phrase, parsed.targetLanguage);
-    const fromModel = fromDictionary ? null : await translatePhraseWithModel(phrase, parsed.targetLanguage);
-    const translated =
-      fromDictionary ??
-      fromModel ??
-      `(${languageLabel(parsed.targetLanguage)} translation unavailable — please rephrase this phrase)`;
+    const fromModel = await translatePhraseWithModel(phrase, parsed.targetLanguage);
+    const backupFromLLM = fromModel
+      ? null
+      : await phiDirectAnswer(
+          `Translate the following text into ${languageLabel(parsed.targetLanguage)}: ${phrase}`
+        );
+    const translatedCandidate = cleanTranslatedText(
+      fromModel ?? backupFromLLM?.split("\n")[0] ?? ""
+    );
+    const translated = translatedCandidate
+      ? translatedCandidate
+      : "[Translation currently unavailable]";
     translatedRows.push({
       source: ensureQuestionPunctuation(phrase),
       translated
@@ -1192,7 +1158,22 @@ const buildConciseFallbackAnswer = (prompt: string) => {
   if (lower.includes("invoice factoring")) {
     return buildInvoiceFactoringReply();
   }
-  return buildFriendlyConversationalReply(prompt);
+  if (lower.includes("self-improve") || lower.includes("inspire me")) {
+    return buildSelfImproveReply();
+  }
+  return "I’m having trouble using the local reasoning model right now. Please retry your question in a moment.";
+};
+
+const looksLikePromptEcho = (prompt: string, response: string) => {
+  const p = normalizePromptForReasoning(prompt).toLowerCase();
+  const r = response.toLowerCase().trim();
+  if (!r) {
+    return true;
+  }
+  if (r.startsWith(`answer: ${p}`) || r.startsWith(p)) {
+    return true;
+  }
+  return false;
 };
 
 const deterministicSearchSynthesis = (input: SearchSynthesisInput) => {
@@ -1223,6 +1204,13 @@ export const phiDirectAnswer = async (
   const fallback = buildConciseFallbackAnswer(normalizedPrompt);
   const generator = await initializeLocalPhi();
   if (!generator) {
+    markPhiDebug({
+      mode: "heuristic",
+      usedWeakRepair: false,
+      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      llmCalled: false,
+      normalizedPrompt
+    });
     return fallback;
   }
 
@@ -1236,11 +1224,32 @@ export const phiDirectAnswer = async (
       }
     );
     const text = sanitizeModelAnswer(output[0]?.generated_text ?? "");
-    if (!text || looksLikeWeakReply(text)) {
+    if (!text || looksLikeWeakReply(text) || looksLikePromptEcho(normalizedPrompt, text)) {
+      markPhiDebug({
+        mode: "model_with_fallback",
+        usedWeakRepair: true,
+        usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+        llmCalled: true,
+        normalizedPrompt
+      });
       return fallback;
     }
+    markPhiDebug({
+      mode: "model",
+      usedWeakRepair: false,
+      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      llmCalled: true,
+      normalizedPrompt
+    });
     return text;
   } catch {
+    markPhiDebug({
+      mode: "model_with_fallback",
+      usedWeakRepair: true,
+      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      llmCalled: true,
+      normalizedPrompt
+    });
     return fallback;
   }
 };
@@ -1279,6 +1288,7 @@ export const phiLLM = async (
       mode: "heuristic",
       usedWeakRepair: false,
       usedSearchHeuristic: Boolean(deterministic.needs_web_search),
+      llmCalled: false,
       normalizedPrompt
     });
     return deterministic;
@@ -1290,6 +1300,7 @@ export const phiLLM = async (
       mode: "heuristic",
       usedWeakRepair: false,
       usedSearchHeuristic: Boolean(deterministic.needs_web_search),
+      llmCalled: false,
       normalizedPrompt
     });
     return deterministic;
@@ -1329,6 +1340,7 @@ export const phiLLM = async (
           mode: usedWeakRepair ? "model_with_fallback" : "model",
           usedWeakRepair,
           usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+          llmCalled: true,
           normalizedPrompt
         });
         return phiResponseSchema.parse({
@@ -1345,6 +1357,7 @@ export const phiLLM = async (
         mode: "model",
         usedWeakRepair: false,
         usedSearchHeuristic: Boolean(modelResult.needs_web_search),
+        llmCalled: true,
         normalizedPrompt
       });
       return modelResult;
@@ -1355,6 +1368,7 @@ export const phiLLM = async (
         mode: "model_with_fallback",
         usedWeakRepair: true,
         usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+        llmCalled: true,
         normalizedPrompt
       });
       return phiResponseSchema.parse({
@@ -1371,6 +1385,7 @@ export const phiLLM = async (
       mode: "heuristic",
       usedWeakRepair: true,
       usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      llmCalled: true,
       normalizedPrompt
     });
     return deterministic;
@@ -1380,6 +1395,7 @@ export const phiLLM = async (
       mode: "heuristic",
       usedWeakRepair: true,
       usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+      llmCalled: true,
       normalizedPrompt
     });
     return deterministic;
