@@ -116,6 +116,12 @@ const extractTopicFromQuestion = (prompt: string) => {
 };
 
 const currentInfoPatterns = [
+  /\bwho is\b/i,
+  /\bwho's\b/i,
+  /\bwhat is\b/i,
+  /\bwhat's\b/i,
+  /\bnet worth\b/i,
+  /\bbillionaire\b/i,
   /\btoday\b/i,
   /\bcurrent\b/i,
   /\blatest\b/i,
@@ -149,7 +155,13 @@ export const shouldUseWebSearch = (prompt: string) => {
   if (lower.includes("send email") || lower.includes("create task") || lower.includes("create project")) {
     return false;
   }
-  return currentInfoPatterns.some((pattern) => pattern.test(normalized));
+  if (currentInfoPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  if (/^(who|what|when|where)\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
 };
 
 const buildPestoRecipeReply = () => {
@@ -304,10 +316,9 @@ const buildInvoiceFactoringReply = () => {
 const buildFactualFallback = (prompt: string) => {
   const topic = extractTopicFromQuestion(prompt);
   return [
-    `Here is a direct explanation of ${topic}:`,
-    `- Definition: ${topic} is best understood by its purpose, how it works, and where it is used.`,
-    "- Practical view: focus on inputs, process, and outcomes.",
-    "- Decision view: compare benefits, risks, and trade-offs before acting."
+    `Here is a direct answer about ${topic}:`,
+    `${topic} depends on context and current facts. I can give the best answer by checking live sources and summarizing them clearly.`,
+    "I will provide the answer first, then concise supporting sources."
   ].join("\n");
 };
 
@@ -315,7 +326,7 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
   const normalized = prompt.trim();
   const lower = normalized.toLowerCase();
 
-  if (lower.includes("pesto recipe")) {
+  if (lower.includes("pesto recipe") || lower.includes("how to make pesto") || lower.includes("make pesto")) {
     return buildPestoRecipeReply();
   }
 
@@ -341,8 +352,8 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
 
   if (lower.includes("richest person in the world") || lower.includes("who's the richest")) {
     return [
-      "Based on recent public billionaire rankings, the richest person is typically Elon Musk.",
-      "That changes frequently with market prices, so I can verify the latest live ranking with web search if you want."
+      "The richest person is currently reported as Elon Musk in most recent billionaire rankings.",
+      "This changes with market prices, so I will verify with live sources for the latest number."
     ].join(" ");
   }
 
@@ -362,7 +373,11 @@ const buildFriendlyConversationalReply = (prompt: string): string => {
     ].join(" ");
   }
 
-  return buildFactualFallback(normalized);
+  if (shouldUseWebSearch(normalized)) {
+    return buildFactualFallback(normalized);
+  }
+
+  return "I’m on it. Here is a clear answer: focus on the outcome, use concrete steps, and execute in order. If you want, I can tailor this to your exact context right now.";
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {

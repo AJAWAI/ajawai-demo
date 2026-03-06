@@ -17,6 +17,7 @@ import {
 import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import { phiLLM } from "./phi";
+import { runPublicWebSearch, type PublicWebSearchResult } from "../search/publicWebSearch";
 
 const relayBaseUrl =
   import.meta.env.VITE_RELAY_BASE_URL ?? "http://localhost:8787";
@@ -42,31 +43,6 @@ interface GmailStatus {
   connected: boolean;
   mode: "live" | "stub";
   detail: string;
-}
-
-interface WebSearchSource {
-  title: string;
-  url: string;
-  snippet: string;
-  source: string;
-  published_at?: string;
-}
-
-interface WebSearchImage {
-  title: string;
-  image_url: string;
-  source_url: string;
-}
-
-interface WebSearchPayload {
-  ok: boolean;
-  query?: string;
-  answer_hint?: string;
-  sources?: WebSearchSource[];
-  images?: WebSearchImage[];
-  warnings?: string[];
-  fetched_at?: string;
-  error?: string;
 }
 
 export interface ActionResult {
@@ -651,18 +627,15 @@ export class PicoClawManager {
     return relayResult;
   }
 
-  private async searchWeb(query: string): Promise<WebSearchPayload> {
+  private async searchWeb(
+    query: string
+  ): Promise<{ ok: true; data: PublicWebSearchResult } | { ok: false; error: string }> {
     try {
-      const url = `${relayBaseUrl}/search/web?q=${encodeURIComponent(query)}`;
-      const response = await fetch(url);
-      if (!response.ok) {
-        const text = await response.text();
-        return {
-          ok: false,
-          error: `Web search failed (${response.status}): ${text}`
-        };
-      }
-      return (await response.json()) as WebSearchPayload;
+      const result = await runPublicWebSearch(query);
+      return {
+        ok: true,
+        data: result
+      };
     } catch (error) {
       return {
         ok: false,
@@ -674,7 +647,7 @@ export class PicoClawManager {
   private buildWebSearchSecretaryAnswer(
     question: string,
     fallbackAnswer: string,
-    payload: WebSearchPayload
+    payload: PublicWebSearchResult
   ) {
     const sources = (payload.sources ?? []).slice(0, 6);
     const images = (payload.images ?? []).slice(0, 4);
@@ -1233,7 +1206,7 @@ export class PicoClawManager {
                 const { response, details } = this.buildWebSearchSecretaryAnswer(
                   command,
                   phiResult.response,
-                  webResult
+                  webResult.data
                 );
                 await this.logTimeline("web_search_completed", `Live web search completed for "${searchQuery}".`, null);
                 outcome = {

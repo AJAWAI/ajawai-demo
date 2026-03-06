@@ -121,6 +121,25 @@ export const syncWithSupabase = async (userId: string) => {
   }
 
   try {
+    const sessionResult = await supabaseClient.auth.getSession();
+    const sessionUserId = sessionResult?.data?.session?.user?.id as string | undefined;
+    if (!sessionUserId) {
+      return {
+        state: "sync_failed" as SyncState,
+        synced: false,
+        detail: "Sync failed: no authenticated Supabase session.",
+        at: nowIso()
+      };
+    }
+    if (sessionUserId !== userId) {
+      return {
+        state: "sync_failed" as SyncState,
+        synced: false,
+        detail: "Sync failed: user/session mismatch.",
+        at: nowIso()
+      };
+    }
+
     const tables: TableConfig<SyncableRow>[] = [
       {
         name: "profiles",
