@@ -1,4 +1,4 @@
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import { useAjawaiSystem } from "../hooks/useAjawaiSystem";
@@ -21,6 +21,9 @@ export default function Dashboard({ session }: DashboardProps) {
   >("Chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [command, setCommand] = useState("");
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
 
   const {
     user,
@@ -52,6 +55,41 @@ export default function Dashboard({ session }: DashboardProps) {
 
   const recentProjects = useMemo(() => snapshot.projects.slice(0, 3), [snapshot.projects]);
   const approvalConversationId = activeConversationId ?? snapshot.conversations[0]?.id ?? "";
+  const syncDebugLabel = syncState
+    ? syncState.state.replaceAll("_", " ")
+    : pendingSync
+      ? "pending sync"
+      : "offline cache only";
+  const syncDebugDetail = syncState?.detail ?? "Waiting for next sync cycle.";
+
+  useEffect(() => {
+    const thread = chatThreadRef.current;
+    if (!thread) {
+      return;
+    }
+    const onScroll = () => {
+      const remaining = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+      stickToBottomRef.current = remaining < 140;
+    };
+    thread.addEventListener("scroll", onScroll);
+    return () => thread.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    requestAnimationFrame(() => {
+      chatBottomRef.current?.scrollIntoView({ block: "end" });
+    });
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [activeConversationMessages]);
 
   const submitCommand = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -99,8 +137,8 @@ export default function Dashboard({ session }: DashboardProps) {
       ].includes(message.type)
     ) {
       return (
-        <article className={`chat-card secretary ${message.type}`} key={message.id}>
-          <strong>{SECRETARY_NAME}</strong>
+        <article className={`chat-message assistant secretary ${message.type}`} key={message.id}>
+          <span className="chat-role">{SECRETARY_NAME}</span>
           <p>{message.content}</p>
         </article>
       );
@@ -231,6 +269,13 @@ export default function Dashboard({ session }: DashboardProps) {
       </header>
 
       <section className="os-content">
+        <article className="sync-debug-pill">
+          <span>Sync: {syncDebugLabel}</span>
+          <span>Memory: {snapshot.memory.length}</span>
+          <span>Conversations: {snapshot.conversations.length}</span>
+          <small>{syncDebugDetail}</small>
+        </article>
+
         {toast && (
           <article className={`toast ${toast.kind}`}>
             <p>{toast.message}</p>
@@ -241,8 +286,8 @@ export default function Dashboard({ session }: DashboardProps) {
         )}
 
         {activeTab === "Chat" && (
-          <div className="stack">
-            <article className="os-card chat-thread">
+          <div className="chat-layout">
+            <article className="os-card chat-thread" ref={chatThreadRef}>
               {activeConversationMessages.map((message) => renderMessageCard(message))}
               {activeConversationMessages.length === 0 && (
                 <article className="chat-message assistant">
@@ -250,6 +295,7 @@ export default function Dashboard({ session }: DashboardProps) {
                   <p>Hello President. I am ready to coordinate with {MANAGER_NAME}.</p>
                 </article>
               )}
+              <div ref={chatBottomRef} className="chat-bottom-anchor" />
             </article>
 
             <form className="chat-composer" onSubmit={submitCommand}>

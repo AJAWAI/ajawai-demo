@@ -85,7 +85,8 @@ create table if not exists memory (
   category text not null default 'general',
   source text not null default 'secretary_phi',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint memory_user_key_unique unique (user_id, key)
 );
 
 create table if not exists conversations (
@@ -117,6 +118,13 @@ create table if not exists settings (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+create index if not exists idx_conversations_user_last_message
+  on conversations (user_id, last_message_at desc);
+create index if not exists idx_messages_user_conversation_created
+  on messages (user_id, conversation_id, created_at asc);
+create index if not exists idx_memory_user_updated
+  on memory (user_id, updated_at desc);
 
 create or replace function set_updated_at()
 returns trigger as $$

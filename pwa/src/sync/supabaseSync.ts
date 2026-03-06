@@ -48,6 +48,23 @@ type TableConfig<T extends SyncableRow> = {
   readLocal: () => Promise<T[]>;
   writeLocal: (rows: T[]) => Promise<unknown>;
   filterColumn?: string;
+  onConflict?: string;
+  normalizeRows?: (rows: T[]) => T[];
+};
+
+const dedupeRows = <T extends SyncableRow>(
+  rows: T[],
+  keyOf: (row: T) => string
+): T[] => {
+  const winners = new Map<string, T>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const existing = winners.get(key);
+    if (!existing || readTimestamp(row) >= readTimestamp(existing)) {
+      winners.set(key, row);
+    }
+  }
+  return Array.from(winners.values());
 };
 
 const syncTable = async <T extends SyncableRow>(config: TableConfig<T>, userId: string) => {
@@ -75,10 +92,12 @@ const syncTable = async <T extends SyncableRow>(config: TableConfig<T>, userId: 
     }
   }
 
-  if (winners.length > 0) {
-    await config.writeLocal(winners);
-    const upsertResult = await supabaseClient.from(config.name).upsert(winners as unknown[], {
-      onConflict: "id"
+  const normalizedRows = config.normalizeRows ? config.normalizeRows(winners) : winners;
+
+  if (normalizedRows.length > 0) {
+    await config.writeLocal(normalizedRows);
+    const upsertResult = await supabaseClient.from(config.name).upsert(normalizedRows as unknown[], {
+      onConflict: config.onConflict ?? "id"
     });
     if (upsertResult.error) {
       throw upsertResult.error;
@@ -140,7 +159,16 @@ export const syncWithSupabase = async (userId: string) => {
         name: "memory",
         filterColumn: "user_id",
         readLocal: () => db.memory.where("user_id").equals(userId).toArray(),
-        writeLocal: (rows) => db.memory.bulkPut(rows as any)
+        writeLocal: (rows) => db.memory.bulkPut(rows as any),
+        onConflict: "user_id,key",
+        normalizeRows: (rows) =>
+          dedupeRows(
+            rows,
+            (row) =>
+              `${(row as { user_id?: string; key?: string }).user_id ?? ""}:${
+                (row as { user_id?: string; key?: string }).key ?? ""
+              }`
+          )
       },
       {
         name: "conversations",

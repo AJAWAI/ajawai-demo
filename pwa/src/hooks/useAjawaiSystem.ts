@@ -98,6 +98,11 @@ export const useAjawaiSystem = (session: Session) => {
   useEffect(() => {
     const initialize = async () => {
       setBusy(true);
+      if (navigator.onLine) {
+        const preloadSync = await syncWithSupabase(user.id);
+        setSyncState(preloadSync);
+        setPendingSync(!preloadSync.synced);
+      }
       await picoClawManager.bootstrap(user.id);
       await refreshSnapshot();
       await refreshGmailStatus();
@@ -122,6 +127,15 @@ export const useAjawaiSystem = (session: Session) => {
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
   }, [pendingSync, refreshGmailStatus, syncNow]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (navigator.onLine && !busy) {
+        void syncNow();
+      }
+    }, 20_000);
+    return () => window.clearInterval(timer);
+  }, [busy, syncNow]);
 
   useEffect(() => {
     if (prevGmailConnected.current === false && gmailStatus.connected) {
@@ -245,7 +259,39 @@ export const useAjawaiSystem = (session: Session) => {
     if (!activeConversationId) {
       return [];
     }
-    return snapshot.messages.filter((message) => message.conversation_id === activeConversationId);
+    const filtered = snapshot.messages.filter(
+      (message) => message.conversation_id === activeConversationId
+    );
+    filtered.sort((a, b) => {
+      const delta = Date.parse(a.created_at) - Date.parse(b.created_at);
+      if (delta !== 0) {
+        return delta;
+      }
+      return a.id.localeCompare(b.id);
+    });
+    const seen = new Set<string>();
+    const semanticSeen = new Map<string, number>();
+    return filtered.filter((message) => {
+      if (seen.has(message.id)) {
+        return false;
+      }
+      seen.add(message.id);
+
+      if (message.role !== "president") {
+        const semanticKey = `${message.role}|${message.type}|${message.content.trim().toLowerCase()}`;
+        const currentTs = Date.parse(message.created_at);
+        const previousTs = semanticSeen.get(semanticKey);
+        if (
+          typeof previousTs === "number" &&
+          Number.isFinite(currentTs) &&
+          Math.abs(currentTs - previousTs) < 2_000
+        ) {
+          return false;
+        }
+        semanticSeen.set(semanticKey, currentTs);
+      }
+      return true;
+    });
   }, [activeConversationId, snapshot.messages]);
 
   const clearToast = useCallback(() => {

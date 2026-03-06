@@ -64,8 +64,7 @@ const parseMemoryRecall = (input: string): string | null => {
     /what's my (.+)\??$/i,
     /what do you know about (.+)\??$/i,
     /do you remember (.+)\??$/i,
-    /recall (.+)\??$/i,
-    /tell me about (.+)\??$/i
+    /recall (.+)\??$/i
   ];
   for (const pattern of patterns) {
     const match = trimmed.match(pattern);
@@ -79,29 +78,205 @@ const parseMemoryRecall = (input: string): string | null => {
   return null;
 };
 
+const looksLikeWeakReply = (reply: string) => {
+  const lower = reply.toLowerCase();
+  return (
+    lower.includes("tell me any constraints") ||
+    lower.includes("preferred style") ||
+    lower.includes("share constraints") ||
+    lower.includes("can you provide more details") ||
+    lower.includes("i need more information to proceed")
+  );
+};
+
+const sanitizeModelAnswer = (text: string) => {
+  return text
+    .replace(/^assistant:\s*/i, "")
+    .replace(/^secretary phi:\s*/i, "")
+    .trim();
+};
+
+const extractIntentText = (prompt: string, patterns: RegExp[]) => {
+  for (const pattern of patterns) {
+    const match = prompt.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim().replace(/\.$/, "");
+    }
+  }
+  return "";
+};
+
+const buildPestoRecipeReply = () => {
+  return [
+    "Absolutely — here is a comprehensive basil pesto recipe:",
+    "",
+    "Ingredients (about 1 to 1.25 cups):",
+    "- 2 cups fresh basil leaves (packed, stems removed)",
+    "- 1/2 cup extra-virgin olive oil (plus extra as needed)",
+    "- 1/3 cup pine nuts (or walnuts for a budget swap)",
+    "- 2 to 3 garlic cloves",
+    "- 1/2 cup finely grated Parmigiano-Reggiano",
+    "- 1/4 cup finely grated Pecorino Romano (optional but great)",
+    "- 1/2 tsp kosher salt, plus more to taste",
+    "- 1 to 2 tsp lemon juice (optional, brightens flavor)",
+    "",
+    "Step-by-step:",
+    "1) Toast nuts: dry-toast pine nuts 2 to 3 minutes on medium-low until lightly golden; cool.",
+    "2) Blend base: add basil, cooled nuts, garlic, and salt to a food processor; pulse until chopped.",
+    "3) Emulsify: with motor running, slowly drizzle in olive oil until creamy.",
+    "4) Finish: pulse in cheeses and lemon juice just until combined.",
+    "5) Adjust: add a splash of oil if too thick; taste and adjust salt/lemon.",
+    "",
+    "How to use:",
+    "- Pasta: thin pesto with 2 to 4 tbsp hot pasta water before tossing.",
+    "- Sandwiches/wraps: spread directly.",
+    "- Proteins/veg: spoon over chicken, fish, roasted potatoes, or grilled vegetables.",
+    "",
+    "Storage tips:",
+    "- Fridge: 4 to 5 days in an airtight jar with a thin olive-oil layer on top.",
+    "- Freezer: portion into ice cube trays, freeze, then transfer to a sealed bag for up to 3 months.",
+    "",
+    "Variations:",
+    "- Dairy-free: skip cheese, add 2 to 3 tbsp nutritional yeast.",
+    "- Nut-free: use toasted sunflower seeds or pepitas.",
+    "- Restaurant-style silkiness: blend a little longer and finish with extra olive oil before serving."
+  ].join("\n");
+};
+
+const buildChickenSoupReply = () => {
+  return [
+    "Great choice — here is a complete chicken soup recipe (serves 4 to 6):",
+    "",
+    "Ingredients:",
+    "- 1 tbsp olive oil",
+    "- 1 medium onion, diced",
+    "- 2 carrots, sliced",
+    "- 2 celery stalks, sliced",
+    "- 3 garlic cloves, minced",
+    "- 8 cups chicken broth",
+    "- 2 cups cooked shredded chicken",
+    "- 1 tsp dried thyme",
+    "- 1 bay leaf",
+    "- Salt and black pepper to taste",
+    "- 1 cup egg noodles or cooked rice (optional)",
+    "- 1 tbsp lemon juice + chopped parsley (finish)",
+    "",
+    "Instructions:",
+    "1) Saute onion, carrot, and celery in olive oil for 6 to 8 minutes.",
+    "2) Add garlic for 30 seconds, then stir in broth, thyme, and bay leaf.",
+    "3) Simmer 15 minutes, add chicken, then simmer 10 more minutes.",
+    "4) Add noodles (or rice) and cook until tender.",
+    "5) Remove bay leaf, season with salt/pepper, finish with lemon and parsley.",
+    "",
+    "Quick upgrades:",
+    "- Add ginger for extra warmth.",
+    "- Add spinach in the last 2 minutes.",
+    "- For meal prep, store noodles separately so they stay firm."
+  ].join("\n");
+};
+
+const buildContractExplainerReply = () => {
+  return [
+    "I can help explain it clearly. If you share the text, I can summarize it line by line.",
+    "For now, here is a practical contract breakdown framework:",
+    "",
+    "1) Scope and deliverables:",
+    "- Exactly what must be delivered, by whom, and by when.",
+    "",
+    "2) Payment terms:",
+    "- Amount, payment schedule, due dates, late fees, and expense rules.",
+    "",
+    "3) Deadlines and milestones:",
+    "- Key dates, dependencies, and what counts as acceptance/completion.",
+    "",
+    "4) Risk clauses:",
+    "- Liability caps, indemnity, warranties, limitation of damages.",
+    "",
+    "5) Termination:",
+    "- How either side can exit, notice periods, and post-termination obligations.",
+    "",
+    "6) IP and confidentiality:",
+    "- Who owns work product, reuse rights, data handling, NDA obligations.",
+    "",
+    "7) Dispute resolution:",
+    "- Governing law, venue, arbitration/mediation requirements.",
+    "",
+    "If you paste the contract (or key sections), I’ll convert this into a plain-English summary and flag risky clauses immediately."
+  ].join("\n");
+};
+
+const buildDraftEmailReply = (prompt: string) => {
+  const topic = extractIntentText(prompt, [
+    /draft an email (?:about|for|to)\s+(.+)$/i,
+    /write an email (?:about|for|to)\s+(.+)$/i,
+    /compose an email (?:about|for|to)\s+(.+)$/i
+  ]);
+  const subject = topic ? `Subject: ${topic.slice(0, 80)}` : "Subject: Quick follow-up";
+  return [
+    "Absolutely — here is a polished draft you can use:",
+    "",
+    subject,
+    "",
+    "Hi [Name],",
+    "",
+    topic
+      ? `I’m reaching out regarding ${topic}. I wanted to share a concise update and align on next steps.`
+      : "I wanted to follow up and align on next steps.",
+    "",
+    "If helpful, I can provide additional context, timelines, and a short action plan.",
+    "",
+    "Would you be available for a quick reply by [date/time]?",
+    "",
+    "Best,",
+    "[Your Name]"
+  ].join("\n");
+};
+
 const buildFriendlyConversationalReply = (prompt: string): string => {
   const normalized = prompt.trim();
   const lower = normalized.toLowerCase();
 
-  if (lower.includes("chicken soup recipe")) {
-    return [
-      "Absolutely — here is a quick chicken soup recipe:",
-      "1) Saute onion, garlic, carrot, and celery in olive oil.",
-      "2) Add shredded chicken, 6 cups broth, salt, pepper, and thyme.",
-      "3) Simmer 20 minutes, then add noodles or rice if you like.",
-      "4) Finish with lemon and parsley. Cozy and done."
-    ].join(" ");
+  if (lower.includes("pesto recipe")) {
+    return buildPestoRecipeReply();
+  }
+
+  if (lower.includes("chicken soup recipe") || lower === "chicken soup recipe") {
+    return buildChickenSoupReply();
+  }
+
+  if (
+    lower.includes("draft an email") ||
+    lower.includes("write an email") ||
+    lower.includes("compose an email")
+  ) {
+    return buildDraftEmailReply(normalized);
+  }
+
+  if (lower.includes("explain this contract") || lower.includes("contract")) {
+    return buildContractExplainerReply();
   }
 
   if (lower.includes("brainstorm")) {
-    return "Great idea. I can brainstorm options with you right away — share your goal and constraints, and I will propose clear options.";
+    return "Great direction. Here are three strong options to start: (1) fastest path with minimal risk, (2) balanced path with moderate effort and higher upside, and (3) ambitious path with maximum upside. If you share your target outcome and timeline, I can turn one option into an action plan right now.";
   }
 
   if (lower.includes("help")) {
-    return "Happy to help. Tell me what outcome you want, and I will guide it step by step.";
+    return "Absolutely. Tell me the exact result you want, and I will give you a direct plan with steps, copy-ready text, or a draft you can use immediately.";
   }
 
-  return `Got it. ${SECRETARY_NAME} can help with that directly. Tell me any constraints or preferred style, and I will tailor the response.`;
+  if (lower.endsWith("recipe") || lower.includes("recipe for")) {
+    return [
+      "Absolutely — here is a strong baseline recipe format you can use immediately:",
+      "ingredients with quantities, step-by-step method, optional substitutions, and storage/reheat guidance.",
+      "If you tell me the exact dish, I will generate a full chef-style version right away."
+    ].join(" ");
+  }
+
+  return [
+    "Absolutely — here is a direct, practical response:",
+    "Start by defining the exact outcome, then break it into 3 parts: immediate action, supporting details, and final output.",
+    "If you share one more line of context, I can turn this into a polished final answer or ready-to-use draft immediately."
+  ].join(" ");
 };
 
 const heuristicPhi = (prompt: string): PhiResponse => {
@@ -145,7 +320,21 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     });
   }
 
-  if (lower.includes("email") || lower.includes("send")) {
+  const draftOnlyEmail =
+    lower.includes("draft an email") ||
+    lower.includes("write an email") ||
+    lower.includes("compose an email");
+  const operationalEmailRequest =
+    !draftOnlyEmail &&
+    (lower.includes("send email") ||
+      lower.startsWith("email ") ||
+      lower.includes("email 10") ||
+      lower.includes("reach out") ||
+      lower.includes("outreach") ||
+      lower.includes("gmail") ||
+      emailMatches.length > 0);
+
+  if (operationalEmailRequest) {
     const recipients = emailMatches.length > 0 ? emailMatches : ["recipient@example.com"];
     const response = {
       intent: "integration_request",
@@ -163,7 +352,11 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     return phiResponseSchema.parse(response);
   }
 
-  if (lower.includes("project")) {
+  if (
+    lower.includes("create project") ||
+    lower.includes("new project") ||
+    lower.includes("setup project")
+  ) {
     const response = {
       intent: "project_request",
       action: "create_project",
@@ -175,7 +368,12 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     return phiResponseSchema.parse(response);
   }
 
-  if (lower.includes("task")) {
+  if (
+    lower.includes("create task") ||
+    lower.includes("add task") ||
+    lower.includes("new task") ||
+    lower.includes("todo")
+  ) {
     const needsApproval = lower.includes("approve");
     const response = {
       intent: "task_request",
@@ -188,7 +386,7 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     return phiResponseSchema.parse(response);
   }
 
-  if (lower.includes("note")) {
+  if (lower.includes("save note") || lower.includes("take note") || lower.includes("new note")) {
     const response = {
       intent: "note_request",
       action: "create_note",
@@ -201,7 +399,11 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     return phiResponseSchema.parse(response);
   }
 
-  if (lower.includes("contact") || emailMatches.length > 0) {
+  if (
+    lower.includes("add contact") ||
+    lower.includes("new contact") ||
+    lower.includes("save contact")
+  ) {
     const needsApproval = lower.includes("subcontractor") || lower.includes("approve");
     const response = {
       intent: needsApproval ? "approval_request" : "contact_request",
@@ -289,7 +491,21 @@ const buildPrompt = (prompt: string) => {
     "Return JSON only with keys:",
     "intent, summary, response, requires_approval, action, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, memory_query, memory_key, memory_value.",
     "Choose intent from conversational, status_query, memory_save, memory_recall, task_request, project_request, note_request, contact_request, approval_request, integration_request, external_action_request, general.",
+    "For normal questions, give a complete direct helpful response immediately in response.",
+    "Do not ask for constraints unless absolutely required.",
+    "Avoid filler language.",
     "If action sends email, set requires_approval true.",
+    `User request: ${prompt}`
+  ].join("\n");
+};
+
+const buildDirectAnswerPrompt = (prompt: string) => {
+  return [
+    "You are Secretary Phi in AJAWAI.",
+    "Answer the user directly with a complete, useful response.",
+    "Be friendly and natural.",
+    "Do not ask follow-up questions unless absolutely necessary.",
+    "Do not use filler text.",
     `User request: ${prompt}`
   ].join("\n");
 };
@@ -297,12 +513,26 @@ const buildPrompt = (prompt: string) => {
 export const getPhiRuntimeState = () => runtimeState;
 
 export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
+  const deterministic = heuristicPhi(prompt);
+  if (deterministic.intent !== "conversational") {
+    return deterministic;
+  }
+
   const generator = await initializeLocalPhi();
   if (!generator) {
-    return heuristicPhi(prompt);
+    return deterministic;
   }
 
   try {
+    const generateDirectAnswer = async () => {
+      const directOutput = await generator(buildDirectAnswerPrompt(prompt), {
+        max_new_tokens: 420,
+        temperature: 0.45,
+        return_full_text: false
+      });
+      return sanitizeModelAnswer(directOutput[0]?.generated_text ?? "");
+    };
+
     const output = await generator(buildPrompt(prompt), {
       max_new_tokens: 256,
       temperature: 0.2,
@@ -313,12 +543,38 @@ export const phiLLM = async (prompt: string): Promise<PhiResponse> => {
     const candidate = jsonFromText(text);
     const parsed = phiResponseSchema.safeParse(candidate);
     if (parsed.success) {
-      return parsed.data;
+      const modelResult = parsed.data;
+      if (modelResult.intent === "conversational" || modelResult.intent === "general") {
+        let directResponse = sanitizeModelAnswer(modelResult.response);
+        if (!directResponse || looksLikeWeakReply(directResponse)) {
+          const generated = await generateDirectAnswer().catch(() => "");
+          directResponse =
+            generated && !looksLikeWeakReply(generated) ? generated : deterministic.response;
+        }
+        return phiResponseSchema.parse({
+          ...modelResult,
+          intent: "conversational",
+          summary: "Conversational request handled directly by Secretary Phi.",
+          response: directResponse,
+          requires_approval: false
+        });
+      }
+      return modelResult;
     }
-    return heuristicPhi(prompt);
+    const generated = await generateDirectAnswer().catch(() => "");
+    if (generated && !looksLikeWeakReply(generated)) {
+      return phiResponseSchema.parse({
+        ...deterministic,
+        intent: "conversational",
+        summary: "Conversational request handled directly by Secretary Phi.",
+        response: generated,
+        requires_approval: false
+      });
+    }
+    return deterministic;
   } catch {
     runtimeState = "fallback";
-    return heuristicPhi(prompt);
+    return deterministic;
   }
 };
 
