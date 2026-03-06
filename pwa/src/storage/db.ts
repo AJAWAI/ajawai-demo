@@ -24,6 +24,13 @@ export interface AgentMessage {
   type:
     | "user"
     | "assistant"
+    | "informational_answer"
+    | "action_completed"
+    | "task_created"
+    | "project_created"
+    | "memory_saved"
+    | "approval_required"
+    | "error_failure"
     | "system_notice"
     | "task_created_card"
     | "project_created_card"
