@@ -27,7 +27,7 @@ interface SyncState {
 }
 
 const toUser = (session: Session): User => session.user;
-const REQUEST_TIMEOUT_MS = 45_000;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) => {
   let timer: number | null = null;
@@ -245,6 +245,7 @@ export const useAjawaiSystem = (session: Session) => {
     activeRunId.current = null;
     setThinking(false);
     setBusy(false);
+    setChatError(null);
   }, []);
 
   const retryLastCommand = useCallback(async () => {
