@@ -12,6 +12,12 @@ body {
   margin: 0;
   background: #0b0f1a;
   color: #ffffff;
+  min-height: 100%;
+}
+
+html,
+#root {
+  height: 100%;
 }
 
 .stack {
@@ -120,8 +126,10 @@ body {
 }
 
 .os-shell {
-  min-height: 100dvh;
-  padding-bottom: max(0.8rem, env(safe-area-inset-bottom));
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .os-header {
@@ -179,7 +187,11 @@ body {
 
 .os-content {
   padding: 0.95rem;
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   gap: 0.75rem;
 }
 
@@ -308,23 +320,25 @@ body {
 
 .chat-thread {
   min-height: 0;
-  height: calc(100dvh - 16.2rem);
   display: flex;
   flex-direction: column;
   gap: 0.62rem;
+  flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0.85rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
 
 .chat-message {
   border-radius: 0.85rem;
   padding: 0.75rem 0.8rem;
   border: 1px solid #2a3755;
-  max-width: 92%;
+  max-width: min(100%, 52rem);
   width: fit-content;
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -364,10 +378,11 @@ body {
   border: 1px solid #2d3d61;
   background: #101624;
   padding: 0.72rem;
-  max-width: 92%;
+  max-width: min(100%, 52rem);
   width: fit-content;
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -385,7 +400,7 @@ body {
   border-color: #5b6f99;
   background: #131b2f;
   align-self: center;
-  max-width: 96%;
+  max-width: min(100%, 58rem);
 }
 
 .chat-card.secretary {
@@ -487,6 +502,13 @@ body {
   margin: 0;
 }
 
+.chat-message-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .chat-error-banner small {
   display: block;
   margin-top: 0.25rem;
@@ -494,8 +516,6 @@ body {
 }
 
 .chat-composer {
-  position: sticky;
-  bottom: max(0.4rem, env(safe-area-inset-bottom));
   background: rgba(11, 15, 26, 0.94);
   border: 1px solid #273553;
   border-radius: 0.85rem;
@@ -508,7 +528,8 @@ body {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 0.6rem;
-  height: calc(100dvh - 11.1rem);
+  flex: 1;
+  min-height: 0;
 }
 
 .chat-bottom-anchor {
@@ -669,10 +690,6 @@ code {
   }
 
   .chat-layout {
-    height: calc(100dvh - 11.6rem);
-  }
-
-  .chat-thread {
-    height: calc(100dvh - 16.7rem);
+    min-height: 0;
   }
 }

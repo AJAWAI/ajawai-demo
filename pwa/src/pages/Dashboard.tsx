@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import { useAjawaiSystem } from "../hooks/useAjawaiSystem";
+import { decideAutoScroll } from "../ui/chatScroll";
 
 interface DashboardProps {
   session: Session;
@@ -24,6 +25,7 @@ export default function Dashboard({ session }: DashboardProps) {
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const pendingSendScrollRef = useRef(false);
 
   const {
     user,
@@ -86,18 +88,32 @@ export default function Dashboard({ session }: DashboardProps) {
 
   useEffect(() => {
     stickToBottomRef.current = true;
+    pendingSendScrollRef.current = false;
     requestAnimationFrame(() => {
       chatBottomRef.current?.scrollIntoView({ block: "end" });
     });
   }, [activeConversationId]);
 
   useEffect(() => {
-    if (!stickToBottomRef.current) {
+    const last = activeConversationMessages[activeConversationMessages.length - 1];
+    const decision = decideAutoScroll({
+      isNearBottom: stickToBottomRef.current,
+      pendingUserSend: pendingSendScrollRef.current,
+      latestRole: last?.role,
+      latestType: last?.type
+    });
+    if (!decision.shouldScroll) {
       return;
     }
     requestAnimationFrame(() => {
-      chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      chatBottomRef.current?.scrollIntoView({
+        behavior: decision.behavior,
+        block: "end"
+      });
     });
+    if (decision.clearPending) {
+      pendingSendScrollRef.current = false;
+    }
   }, [activeConversationMessages]);
 
   const submitCommand = async (event: FormEvent<HTMLFormElement>) => {
@@ -105,6 +121,7 @@ export default function Dashboard({ session }: DashboardProps) {
     if (!command.trim() || !activeConversationId) {
       return;
     }
+    pendingSendScrollRef.current = true;
     await runCommand(command, activeConversationId);
     setCommand("");
   };
@@ -152,7 +169,7 @@ export default function Dashboard({ session }: DashboardProps) {
       return (
         <article className="chat-message assistant" key={message.id}>
           <span className="chat-role">{SECRETARY_NAME}</span>
-          <p>{message.content}</p>
+          <p className="chat-message-text">{message.content}</p>
         </article>
       );
     }
@@ -172,7 +189,7 @@ export default function Dashboard({ session }: DashboardProps) {
       return (
         <article className={`chat-message assistant secretary ${message.type}`} key={message.id}>
           <span className="chat-role">{SECRETARY_NAME}</span>
-          <p>{message.content}</p>
+          <p className="chat-message-text">{message.content}</p>
           {sources.length > 0 && (
             <div className="chat-sources">
               <strong>Sources</strong>
@@ -214,7 +231,7 @@ export default function Dashboard({ session }: DashboardProps) {
       return (
         <article className="chat-message user" key={message.id}>
           <span className="chat-role">President</span>
-          <p>{message.content}</p>
+          <p className="chat-message-text">{message.content}</p>
         </article>
       );
     }
@@ -343,6 +360,14 @@ export default function Dashboard({ session }: DashboardProps) {
           <small>
             Last attempt: {syncDebugAt} • Last success: {lastSuccessLabel} • {syncDebugDetail}
           </small>
+          {syncState?.domains && Object.keys(syncState.domains).length > 0 && (
+            <small>
+              Domains:{" "}
+              {Object.entries(syncState.domains)
+                .map(([domain, status]) => `${domain}=${status.state}`)
+                .join(" • ")}
+            </small>
+          )}
         </article>
 
         {toast && (
@@ -361,7 +386,9 @@ export default function Dashboard({ session }: DashboardProps) {
               {activeConversationMessages.length === 0 && (
                 <article className="chat-message assistant">
                   <span className="chat-role">{SECRETARY_NAME}</span>
-                  <p>Hello President. I am ready to coordinate with {MANAGER_NAME}.</p>
+                  <p className="chat-message-text">
+                    Hello President. I am ready to coordinate with {MANAGER_NAME}.
+                  </p>
                 </article>
               )}
               <div ref={chatBottomRef} className="chat-bottom-anchor" />
@@ -688,7 +715,9 @@ export default function Dashboard({ session }: DashboardProps) {
               <small>{syncDebugDetail}</small>
               <p>
                 Model: {phiStatus.runtime} • Ready: {phiStatus.model_ready ? "yes" : "no"} • Last
-                mode: {phiStatus.llm_mode} • LLM called: {phiStatus.llm_called ? "yes" : "no"}
+                mode: {phiStatus.llm_mode} • Response mode: {phiStatus.response_mode} • LLM called:{" "}
+                {phiStatus.llm_called ? "yes" : "no"} • Truncated:{" "}
+                {phiStatus.output_truncated ? "yes" : "no"}
               </p>
               {phiStatus.model_load_error ? <small>{phiStatus.model_load_error}</small> : null}
               <ul className="os-list">
@@ -703,7 +732,8 @@ export default function Dashboard({ session }: DashboardProps) {
                       memory={trace.memory_used ? "yes" : "no"} • llm={trace.llm_called ? "yes" : "no"} • fallback=
                       {trace.fallback_triggered ? "yes" : "no"} • template_fallback=
                       {trace.template_fallback_used ? "yes" : "no"} • quality_guard=
-                      {trace.quality_guard_triggered ? "yes" : "no"} •{" "}
+                      {trace.quality_guard_triggered ? "yes" : "no"} • mode={trace.response_mode} •
+                      truncated={trace.output_truncated ? "yes" : "no"} •{" "}
                       {new Date(trace.at).toLocaleTimeString()}
                     </small>
                   </li>

@@ -10,6 +10,7 @@ type SyncableRow = {
 };
 
 export type SyncState = "synced" | "pending_sync" | "offline_cache_only" | "sync_failed";
+export type SyncDomainState = "synced" | "failed" | "skipped";
 
 const readTimestamp = (row: SyncableRow) =>
   Date.parse(row.updated_at ?? row.created_at ?? "1970-01-01T00:00:00.000Z");
@@ -42,6 +43,14 @@ type TableName =
   | "conversations"
   | "messages"
   | "settings";
+
+export type SyncDomainStatus = {
+  state: SyncDomainState;
+  detail: string;
+  critical: boolean;
+};
+
+export type SyncDomainStatusMap = Partial<Record<TableName, SyncDomainStatus>>;
 
 type TableConfig<T extends SyncableRow> = {
   name: TableName;
@@ -130,6 +139,7 @@ export const syncWithSupabase = async (userId: string) => {
       state: "offline_cache_only" as SyncState,
       synced: false,
       detail: "Offline. Sync deferred.",
+      domains: {} as SyncDomainStatusMap,
       at: nowIso()
     };
   }
@@ -142,6 +152,7 @@ export const syncWithSupabase = async (userId: string) => {
         state: "sync_failed" as SyncState,
         synced: false,
         detail: "Sync failed: no authenticated Supabase session.",
+        domains: {} as SyncDomainStatusMap,
         at: nowIso()
       };
     }
@@ -150,6 +161,7 @@ export const syncWithSupabase = async (userId: string) => {
         state: "sync_failed" as SyncState,
         synced: false,
         detail: "Sync failed: user/session mismatch.",
+        domains: {} as SyncDomainStatusMap,
         at: nowIso()
       };
     }
@@ -239,20 +251,49 @@ export const syncWithSupabase = async (userId: string) => {
       }
     ];
 
-    const criticalFailures: string[] = [];
-    const optionalSkips: string[] = [];
-    for (const table of tables) {
-      try {
-        await syncTable(table, userId);
-      } catch (error) {
-        const reason = `${table.name}: ${error instanceof Error ? error.message : "sync failed"}`;
-        if (!table.critical && isSkippableTableError(error)) {
-          optionalSkips.push(reason);
-        } else if (table.critical) {
-          criticalFailures.push(reason);
-        } else {
-          optionalSkips.push(reason);
+    const domains: SyncDomainStatusMap = {};
+    const settled = await Promise.allSettled(
+      tables.map(async (table) => {
+        try {
+          await syncTable(table, userId);
+          return {
+            name: table.name,
+            critical: table.critical,
+            state: "synced" as SyncDomainState,
+            detail: "Synced"
+          };
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "sync failed";
+          const skippable = !table.critical && isSkippableTableError(error);
+          return {
+            name: table.name,
+            critical: table.critical,
+            state: (skippable ? "skipped" : "failed") as SyncDomainState,
+            detail: reason
+          };
         }
+      })
+    );
+
+    const criticalFailures: string[] = [];
+    const optionalFailures: string[] = [];
+    const optionalSkips: string[] = [];
+    for (const result of settled) {
+      if (result.status !== "fulfilled") {
+        continue;
+      }
+      const row = result.value;
+      domains[row.name] = {
+        state: row.state,
+        detail: row.detail,
+        critical: row.critical
+      };
+      if (row.state === "failed" && row.critical) {
+        criticalFailures.push(`${row.name}: ${row.detail}`);
+      } else if (row.state === "failed") {
+        optionalFailures.push(`${row.name}: ${row.detail}`);
+      } else if (row.state === "skipped") {
+        optionalSkips.push(`${row.name}: ${row.detail}`);
       }
     }
 
@@ -261,17 +302,27 @@ export const syncWithSupabase = async (userId: string) => {
         state: "sync_failed" as SyncState,
         synced: false,
         detail: `Critical sync failed: ${criticalFailures.join(" | ")}`,
+        domains,
         at: nowIso()
       };
     }
 
+    const hasOptionalIssues = optionalFailures.length > 0 || optionalSkips.length > 0;
+    const detailSegments = ["Core sync succeeded (critical tables)."];
+    if (optionalFailures.length > 0) {
+      detailSegments.push(`Optional failures: ${optionalFailures.join(" | ")}`);
+    }
+    if (optionalSkips.length > 0) {
+      detailSegments.push(`Optional skips: ${optionalSkips.join(" | ")}`);
+    }
+
     return {
-      state: "synced" as SyncState,
-      synced: true,
-      detail:
-        optionalSkips.length > 0
-          ? `Core sync succeeded. Optional tables skipped: ${optionalSkips.join(" | ")}`
-          : "Local cache synced to Supabase (last-write-wins).",
+      state: hasOptionalIssues ? ("pending_sync" as SyncState) : ("synced" as SyncState),
+      synced: !hasOptionalIssues,
+      detail: hasOptionalIssues
+        ? detailSegments.join(" ")
+        : "Local cache synced to Supabase (last-write-wins).",
+      domains,
       at: nowIso()
     };
   } catch (error) {
@@ -279,6 +330,7 @@ export const syncWithSupabase = async (userId: string) => {
       state: "sync_failed" as SyncState,
       synced: false,
       detail: error instanceof Error ? error.message : "Sync failed.",
+      domains: {} as SyncDomainStatusMap,
       at: nowIso()
     };
   }
