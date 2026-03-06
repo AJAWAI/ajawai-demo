@@ -228,6 +228,27 @@ body {
   font-size: 0.9rem;
 }
 
+.auth-actions {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.auth-link-button {
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  text-align: left;
+  padding: 0;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.auth-link-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .button:disabled {
   opacity: 0.65;
   cursor: not-allowed;
