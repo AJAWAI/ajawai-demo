@@ -47,9 +47,23 @@ type TableConfig<T extends SyncableRow> = {
   name: TableName;
   readLocal: () => Promise<T[]>;
   writeLocal: (rows: T[]) => Promise<unknown>;
+  critical: boolean;
   filterColumn?: string;
   onConflict?: string;
   normalizeRows?: (rows: T[]) => T[];
+};
+
+const isSkippableTableError = (error: unknown) => {
+  const code = (error as { code?: string })?.code ?? "";
+  const message = (error as { message?: string })?.message ?? "";
+  const normalized = `${code} ${message}`.toLowerCase();
+  return (
+    normalized.includes("42p01") ||
+    normalized.includes("does not exist") ||
+    normalized.includes("permission denied") ||
+    normalized.includes("42501") ||
+    normalized.includes("not authorized")
+  );
 };
 
 const dedupeRows = <T extends SyncableRow>(
@@ -143,44 +157,52 @@ export const syncWithSupabase = async (userId: string) => {
     const tables: TableConfig<SyncableRow>[] = [
       {
         name: "profiles",
+        critical: true,
         filterColumn: "user_id",
         readLocal: () => db.profiles.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.profiles.bulkPut(rows as any)
       },
       {
         name: "projects",
+        critical: false,
         filterColumn: "owner_id",
         readLocal: () => db.projects.where("owner_id").equals(userId).toArray(),
         writeLocal: (rows) => db.projects.bulkPut(rows as any)
       },
       {
         name: "tasks",
+        critical: false,
         readLocal: () => db.tasks.toArray(),
         writeLocal: (rows) => db.tasks.bulkPut(rows as any)
       },
       {
         name: "contacts",
+        critical: false,
         readLocal: () => db.contacts.toArray(),
         writeLocal: (rows) => db.contacts.bulkPut(rows as any)
       },
       {
         name: "notes",
+        critical: false,
         filterColumn: "user_id",
         readLocal: () => db.notes.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.notes.bulkPut(rows as any)
       },
       {
         name: "approvals",
+        critical: false,
         readLocal: () => db.approvals.toArray(),
         writeLocal: (rows) => db.approvals.bulkPut(rows as any)
       },
       {
         name: "timeline",
+        critical: false,
         readLocal: () => db.timeline.toArray(),
         writeLocal: (rows) => db.timeline.bulkPut(rows as any)
       },
       {
         name: "memory",
+        critical: true,
         filterColumn: "user_id",
         readLocal: () => db.memory.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.memory.bulkPut(rows as any),
@@ -196,40 +218,49 @@ export const syncWithSupabase = async (userId: string) => {
       },
       {
         name: "conversations",
+        critical: true,
         filterColumn: "user_id",
         readLocal: () => db.conversations.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.conversations.bulkPut(rows as any)
       },
       {
         name: "messages",
+        critical: true,
         filterColumn: "user_id",
         readLocal: () => db.messages.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.messages.bulkPut(rows as any)
       },
       {
         name: "settings",
+        critical: true,
         filterColumn: "user_id",
         readLocal: () => db.settings.where("user_id").equals(userId).toArray(),
         writeLocal: (rows) => db.settings.bulkPut(rows as any)
       }
     ];
 
-    const failures: string[] = [];
+    const criticalFailures: string[] = [];
+    const optionalSkips: string[] = [];
     for (const table of tables) {
       try {
         await syncTable(table, userId);
       } catch (error) {
-        failures.push(
-          `${table.name}: ${error instanceof Error ? error.message : "sync failed"}`
-        );
+        const reason = `${table.name}: ${error instanceof Error ? error.message : "sync failed"}`;
+        if (!table.critical && isSkippableTableError(error)) {
+          optionalSkips.push(reason);
+        } else if (table.critical) {
+          criticalFailures.push(reason);
+        } else {
+          optionalSkips.push(reason);
+        }
       }
     }
 
-    if (failures.length > 0) {
+    if (criticalFailures.length > 0) {
       return {
         state: "sync_failed" as SyncState,
         synced: false,
-        detail: `Partial sync completed with errors: ${failures.join(" | ")}`,
+        detail: `Critical sync failed: ${criticalFailures.join(" | ")}`,
         at: nowIso()
       };
     }
@@ -237,7 +268,10 @@ export const syncWithSupabase = async (userId: string) => {
     return {
       state: "synced" as SyncState,
       synced: true,
-      detail: "Local cache synced to Supabase (last-write-wins).",
+      detail:
+        optionalSkips.length > 0
+          ? `Core sync succeeded. Optional tables skipped: ${optionalSkips.join(" | ")}`
+          : "Local cache synced to Supabase (last-write-wins).",
       at: nowIso()
     };
   } catch (error) {

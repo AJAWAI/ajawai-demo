@@ -41,6 +41,7 @@ export default function Dashboard({ session }: DashboardProps) {
     retryLastCommand,
     resetThinkingState,
     debugTraces,
+    lastSuccessfulSyncAt,
     approve,
     reject,
     syncNow,
@@ -66,6 +67,9 @@ export default function Dashboard({ session }: DashboardProps) {
       : "offline cache only";
   const syncDebugDetail = syncState?.detail ?? "Waiting for next sync cycle.";
   const syncDebugAt = syncState ? new Date(syncState.at).toLocaleTimeString() : "not yet";
+  const lastSuccessLabel = lastSuccessfulSyncAt
+    ? new Date(lastSuccessfulSyncAt).toLocaleTimeString()
+    : "none";
 
   useEffect(() => {
     const thread = chatThreadRef.current;
@@ -337,7 +341,7 @@ export default function Dashboard({ session }: DashboardProps) {
           <span>Memory: {snapshot.memory.length}</span>
           <span>Conversations: {snapshot.conversations.length}</span>
           <small>
-            Last sync: {syncDebugAt} • {syncDebugDetail}
+            Last attempt: {syncDebugAt} • Last success: {lastSuccessLabel} • {syncDebugDetail}
           </small>
         </article>
 
@@ -678,6 +682,10 @@ export default function Dashboard({ session }: DashboardProps) {
             <article className="os-card">
               <h2>Developer Debug</h2>
               <small>Recent assistant routing diagnostics (latest first).</small>
+              <p>
+                Sync state: {syncDebugLabel} • Last success: {lastSuccessLabel}
+              </p>
+              <small>{syncDebugDetail}</small>
               <ul className="os-list">
                 {debugTraces.map((trace, index) => (
                   <li key={`${trace.at}-${index}`} className="os-list-item">
