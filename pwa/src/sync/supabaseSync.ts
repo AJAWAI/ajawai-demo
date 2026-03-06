@@ -9,7 +9,7 @@ type SyncableRow = {
   created_at?: string;
 };
 
-export type SyncState = "synced" | "pending_sync" | "offline_cache_only";
+export type SyncState = "synced" | "pending_sync" | "offline_cache_only" | "sync_failed";
 
 const readTimestamp = (row: SyncableRow) =>
   Date.parse(row.updated_at ?? row.created_at ?? "1970-01-01T00:00:00.000Z");
@@ -96,9 +96,14 @@ const syncTable = async <T extends SyncableRow>(config: TableConfig<T>, userId: 
 
   if (normalizedRows.length > 0) {
     await config.writeLocal(normalizedRows);
-    const upsertResult = await supabaseClient.from(config.name).upsert(normalizedRows as unknown[], {
+    let upsertResult = await supabaseClient.from(config.name).upsert(normalizedRows as unknown[], {
       onConflict: config.onConflict ?? "id"
     });
+    if (upsertResult.error && config.onConflict && config.onConflict !== "id") {
+      upsertResult = await supabaseClient.from(config.name).upsert(normalizedRows as unknown[], {
+        onConflict: "id"
+      });
+    }
     if (upsertResult.error) {
       throw upsertResult.error;
     }
@@ -190,8 +195,24 @@ export const syncWithSupabase = async (userId: string) => {
       }
     ];
 
+    const failures: string[] = [];
     for (const table of tables) {
-      await syncTable(table, userId);
+      try {
+        await syncTable(table, userId);
+      } catch (error) {
+        failures.push(
+          `${table.name}: ${error instanceof Error ? error.message : "sync failed"}`
+        );
+      }
+    }
+
+    if (failures.length > 0) {
+      return {
+        state: "sync_failed" as SyncState,
+        synced: false,
+        detail: `Partial sync completed with errors: ${failures.join(" | ")}`,
+        at: nowIso()
+      };
     }
 
     return {
@@ -202,7 +223,7 @@ export const syncWithSupabase = async (userId: string) => {
     };
   } catch (error) {
     return {
-      state: "pending_sync" as SyncState,
+      state: "sync_failed" as SyncState,
       synced: false,
       detail: error instanceof Error ? error.message : "Sync failed.",
       at: nowIso()

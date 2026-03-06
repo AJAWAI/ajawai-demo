@@ -44,6 +44,31 @@ interface GmailStatus {
   detail: string;
 }
 
+interface WebSearchSource {
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+  published_at?: string;
+}
+
+interface WebSearchImage {
+  title: string;
+  image_url: string;
+  source_url: string;
+}
+
+interface WebSearchPayload {
+  ok: boolean;
+  query?: string;
+  answer_hint?: string;
+  sources?: WebSearchSource[];
+  images?: WebSearchImage[];
+  warnings?: string[];
+  fetched_at?: string;
+  error?: string;
+}
+
 export interface ActionResult {
   ok: boolean;
   kind:
@@ -124,6 +149,8 @@ const parseContactPayload = (approval: Approval): ContactSubcontractorApprovalPa
 const safeText = (value: string | undefined, fallback: string) => {
   return value && value.trim().length > 0 ? value.trim() : fallback;
 };
+
+const cleanSnippet = (text: string) => text.replace(/\s+/g, " ").trim();
 
 const sortByDateDesc = <T>(rows: T[], readDate: (row: T) => string) => {
   return [...rows].sort((a, b) => {
@@ -624,6 +651,65 @@ export class PicoClawManager {
     return relayResult;
   }
 
+  private async searchWeb(query: string): Promise<WebSearchPayload> {
+    try {
+      const url = `${relayBaseUrl}/search/web?q=${encodeURIComponent(query)}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        const text = await response.text();
+        return {
+          ok: false,
+          error: `Web search failed (${response.status}): ${text}`
+        };
+      }
+      return (await response.json()) as WebSearchPayload;
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "Web search request failed."
+      };
+    }
+  }
+
+  private buildWebSearchSecretaryAnswer(
+    question: string,
+    fallbackAnswer: string,
+    payload: WebSearchPayload
+  ) {
+    const sources = (payload.sources ?? []).slice(0, 6);
+    const images = (payload.images ?? []).slice(0, 4);
+    const firstFact =
+      cleanSnippet(payload.answer_hint ?? "") ||
+      cleanSnippet(sources[0]?.snippet ?? "") ||
+      cleanSnippet(fallbackAnswer);
+    const supportBullets = sources
+      .slice(0, 3)
+      .map((source, index) => `${index + 1}. ${source.title}: ${cleanSnippet(source.snippet)}`)
+      .join("\n");
+    const warnings = (payload.warnings ?? []).filter((warning) => warning.trim().length > 0);
+
+    const response = [
+      firstFact || `Here is what I found for "${question}".`,
+      supportBullets ? `\nKey context:\n${supportBullets}` : "",
+      warnings.length > 0
+        ? `\nNote: Some live sources were unavailable (${warnings.join(" | ")}).`
+        : "",
+      sources.length > 0 ? "\nI included source links below." : ""
+    ]
+      .join("\n")
+      .trim();
+
+    return {
+      response,
+      details: {
+        search_query: payload.query ?? question,
+        search_fetched_at: payload.fetched_at ?? nowIso(),
+        sources,
+        images
+      }
+    };
+  }
+
   async approve(approvalId: string, conversationId: string): Promise<ActionResult> {
     const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
@@ -853,12 +939,6 @@ export class PicoClawManager {
       if (effectiveIntent === "status_query" || isStatusRequest(command)) {
         const statusSummary = await this.getSystemStatusSummary(userId);
         await this.logTimeline("status_checked", "System status requested by President.", null);
-        await this.addMessage({
-          conversationId,
-          role: "manager_pico",
-          type: "system_notice",
-          content: `${MANAGER_NAME} gathered current system status for Secretary Phi.`
-        });
         outcome = {
           type: "informational_answer",
           ok: true,
@@ -1146,6 +1226,42 @@ export class PicoClawManager {
             break;
           }
           case "conversational": {
+            if (phiResult.needs_web_search) {
+              const searchQuery = safeText(phiResult.web_search_query, command);
+              const webResult = await this.searchWeb(searchQuery);
+              if (webResult.ok) {
+                const { response, details } = this.buildWebSearchSecretaryAnswer(
+                  command,
+                  phiResult.response,
+                  webResult
+                );
+                await this.logTimeline("web_search_completed", `Live web search completed for "${searchQuery}".`, null);
+                outcome = {
+                  type: "informational_answer",
+                  ok: true,
+                  summary: response,
+                  details
+                };
+                break;
+              }
+
+              await this.logTimeline(
+                "web_search_failed",
+                `Web search failed for "${searchQuery}": ${webResult.error ?? "unknown error"}`,
+                null
+              );
+              outcome = {
+                type: "informational_answer",
+                ok: true,
+                summary: `${phiResult.response}\n\nI could not reach live web search just now, so this answer may not include the latest updates.`,
+                details: {
+                  search_query: searchQuery,
+                  search_error: webResult.error ?? "Web search unavailable"
+                }
+              };
+              break;
+            }
+
             outcome = {
               type: "informational_answer",
               ok: true,
@@ -1158,8 +1274,10 @@ export class PicoClawManager {
             outcome = {
               type: "informational_answer",
               ok: true,
-              summary:
-                "I reviewed the request, but I need more information to execute that action. Tell me the exact outcome you want."
+              summary: safeText(
+                phiResult.response,
+                "I could not complete that as an operation yet, but I can help if you share the specific result you want."
+              )
             };
           }
         }

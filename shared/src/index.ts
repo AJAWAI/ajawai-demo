@@ -206,6 +206,8 @@ export const phiResponseSchema = z.object({
   email_to: z.array(z.string().email()).optional(),
   email_subject: z.string().optional(),
   email_body: z.string().optional(),
+  needs_web_search: z.boolean().optional(),
+  web_search_query: z.string().optional(),
   memory_query: z.string().optional(),
   memory_key: z.string().optional(),
   memory_value: z.string().optional()

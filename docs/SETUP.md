@@ -3,7 +3,7 @@
 This repository contains:
 
 - `/pwa`: Vite + React + TypeScript installable PWA
-- `/relay`: Fastify + TypeScript relay for Gmail send and webhook ingestion
+- `/relay`: Fastify + TypeScript relay for Gmail send, webhook ingestion, and web search proxy
 - `/shared`: shared TypeScript types + zod schemas
 
 Module 3 adds a local-first AI operating system with:
@@ -125,6 +125,22 @@ Returns whether relay has active Gmail credential configuration.
 
 Returns a generated OAuth URL when Google OAuth env vars are configured.
 
+### `GET /search/web?q=<query>`
+
+Runs a server-side web search aggregation for Secretary Phi (DuckDuckGo, Wikipedia, Google News RSS)
+and returns:
+
+- `answer_hint`
+- `sources[]` (title, url, snippet)
+- `images[]` (image URL + source URL)
+- `warnings[]` for partial failures
+
+Example:
+
+```bash
+curl "http://localhost:8787/search/web?q=richest%20person%20in%20the%20world"
+```
+
 ## Useful scripts
 
 From repo root:
@@ -139,7 +155,7 @@ From repo root:
 
 - PWA is mobile-first and installable (service worker + web manifest via `vite-plugin-pwa`).
 - Secretary Phi runs locally in-browser (Transformers.js WebGPU/WASM path + fallback parser).
-- Core app functionality is local-first and available offline except Gmail sending.
+- Core app functionality is local-first and available offline except Gmail sending and live web search.
 - IndexedDB stores profiles, projects, tasks, contacts, notes, approvals, timeline, memory, and agent messages.
 - Supabase sync is optional and uses last-write-wins (`updated_at`).
 - Supabase Module 3 table SQL is in `docs/supabase/module3_schema.sql`.
