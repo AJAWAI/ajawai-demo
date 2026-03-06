@@ -16,7 +16,7 @@ import {
 } from "../storage/db";
 import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
-import { phiLLM, phiSynthesizeSearchAnswer } from "./phi";
+import { getLastPhiDebugMeta, phiDirectAnswer, phiLLM, phiSynthesizeSearchAnswer } from "./phi";
 import { runPublicWebSearch, type PublicWebSearchResult } from "../search/publicWebSearch";
 
 const relayBaseUrl =
@@ -73,6 +73,23 @@ interface CommandOutcome {
   details?: Record<string, unknown>;
 }
 
+export interface CommandDebugInfo {
+  intent: string;
+  route:
+    | "direct_conversational"
+    | "memory_recall"
+    | "memory_save"
+    | "search_assisted_conversational"
+    | "status_query"
+    | "pico_operational";
+  search_used: boolean;
+  pico_used: boolean;
+  memory_used: boolean;
+  fallback_triggered: boolean;
+  quality_guard_triggered: boolean;
+  at: string;
+}
+
 export interface Module3Snapshot {
   profiles: Profile[];
   projects: Project[];
@@ -127,6 +144,12 @@ const safeText = (value: string | undefined, fallback: string) => {
 };
 
 const cleanSnippet = (text: string) => text.replace(/\s+/g, " ").trim();
+const fillerPatterns = [
+  /start by defining the exact outcome/i,
+  /tell me any constraints/i,
+  /best understood by its purpose/i,
+  /i reviewed the request/i
+];
 
 const sortByDateDesc = <T>(rows: T[], readDate: (row: T) => string) => {
   return [...rows].sort((a, b) => {
@@ -684,6 +707,49 @@ export class PicoClawManager {
     };
   }
 
+  private isLowQualityAnswer(question: string, answer: string) {
+    const normalized = answer.trim();
+    if (normalized.length < 60) {
+      return true;
+    }
+    if (fillerPatterns.some((pattern) => pattern.test(normalized))) {
+      return true;
+    }
+    const questionTokens = question
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 3);
+    const answerLower = normalized.toLowerCase();
+    const overlap = questionTokens.filter((token) => answerLower.includes(token)).length;
+    if (questionTokens.length >= 2 && overlap === 0) {
+      return true;
+    }
+    return false;
+  }
+
+  private async ensureDirectAnswerQuality(question: string, candidate: string) {
+    if (!this.isLowQualityAnswer(question, candidate)) {
+      return {
+        answer: candidate,
+        repaired: false
+      };
+    }
+
+    const repaired = await phiDirectAnswer(question);
+    if (!this.isLowQualityAnswer(question, repaired)) {
+      return {
+        answer: repaired,
+        repaired: true
+      };
+    }
+
+    return {
+      answer: candidate,
+      repaired: false
+    };
+  }
+
   async approve(approvalId: string, conversationId: string): Promise<ActionResult> {
     const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
@@ -902,6 +968,17 @@ export class PicoClawManager {
         : phiResult.intent === "general" && forcedMemoryRecall
           ? "memory_recall"
           : phiResult.intent;
+    const phiDebug = getLastPhiDebugMeta();
+    const debug: CommandDebugInfo = {
+      intent: effectiveIntent,
+      route: "direct_conversational",
+      search_used: false,
+      pico_used: false,
+      memory_used: false,
+      fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "heuristic",
+      quality_guard_triggered: false,
+      at: nowIso()
+    };
 
     let outcome: CommandOutcome = {
       type: "action_completed",
@@ -911,6 +988,7 @@ export class PicoClawManager {
 
     try {
       if (effectiveIntent === "status_query" || isStatusRequest(command)) {
+        debug.route = "status_query";
         const statusSummary = await this.getSystemStatusSummary(userId);
         await this.logTimeline("status_checked", "System status requested by President.", null);
         outcome = {
@@ -921,6 +999,8 @@ export class PicoClawManager {
       } else {
         switch (effectiveIntent) {
           case "project_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             const projectName = safeText(phiResult.project_name, "Untitled Project");
             const project = await this.createProject(userId, projectName, phiResult.summary);
             await this.addMessage({
@@ -943,6 +1023,8 @@ export class PicoClawManager {
             break;
           }
           case "task_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             const taskTitle = safeText(phiResult.task_title, "New Task");
             if (phiResult.requires_approval) {
               const approval = await this.createApproval("create_task", {
@@ -997,6 +1079,8 @@ export class PicoClawManager {
           }
           case "contact_request":
           case "approval_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             const contactName = safeText(phiResult.contact_name, "New Contact");
             const contactEmail = safeText(phiResult.contact_email, "contact@example.com");
             if (phiResult.requires_approval) {
@@ -1042,6 +1126,8 @@ export class PicoClawManager {
             break;
           }
           case "note_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             const note = await this.createNote(
               userId,
               safeText(phiResult.note_title, "President Note"),
@@ -1066,6 +1152,8 @@ export class PicoClawManager {
             break;
           }
           case "memory_save": {
+            debug.route = "memory_save";
+            debug.memory_used = true;
             const key = safeText(phiResult.memory_key, forcedMemorySave?.key ?? "note");
             const value = safeText(phiResult.memory_value, forcedMemorySave?.value ?? command);
             await this.remember(userId, key, value, "preference", "secretary_phi");
@@ -1084,6 +1172,8 @@ export class PicoClawManager {
             break;
           }
           case "memory_recall": {
+            debug.route = "memory_recall";
+            debug.memory_used = true;
             const query = safeText(phiResult.memory_query, forcedMemoryRecall ?? command);
             const matches = await this.searchMemory(userId, query);
             if (matches.length > 0) {
@@ -1112,6 +1202,8 @@ export class PicoClawManager {
             break;
           }
           case "integration_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             if (phiResult.action && phiResult.action !== "send_email") {
               await this.addMessage({
                 conversationId,
@@ -1185,6 +1277,8 @@ export class PicoClawManager {
             break;
           }
           case "external_action_request": {
+            debug.route = "pico_operational";
+            debug.pico_used = true;
             await this.addMessage({
               conversationId,
               role: "manager_pico",
@@ -1200,7 +1294,10 @@ export class PicoClawManager {
             break;
           }
           case "conversational": {
+            debug.route = "direct_conversational";
             if (phiResult.needs_web_search) {
+              debug.route = "search_assisted_conversational";
+              debug.search_used = true;
               const searchQuery = safeText(phiResult.web_search_query, command);
               const webResult = await this.searchWeb(searchQuery);
               if (webResult.ok) {
@@ -1244,6 +1341,7 @@ export class PicoClawManager {
             break;
           }
           default: {
+            debug.route = "direct_conversational";
             await this.logTimeline("command_interpreted", phiResult.summary, null);
             outcome = {
               type: "informational_answer",
@@ -1280,12 +1378,18 @@ export class PicoClawManager {
       );
     }
 
-    const finalResponse = this.buildSecretaryFinalResponse(outcome);
+    let finalResponse = this.buildSecretaryFinalResponse(outcome);
+    if (debug.route === "direct_conversational" || debug.route === "search_assisted_conversational") {
+      const guarded = await this.ensureDirectAnswerQuality(command, finalResponse);
+      finalResponse = guarded.answer;
+      debug.quality_guard_triggered = guarded.repaired;
+    }
     await this.addSecretaryFinalMessage(conversationId, outcome.type, finalResponse, outcome.details);
     this.invalidateSnapshot();
     return {
       ...phiResult,
-      response: finalResponse
+      response: finalResponse,
+      debug
     };
   }
 
