@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build shared workspace
+        run: npm run build --workspace shared
+
       - name: Build PWA
         run: npm run build --workspace pwa
 
