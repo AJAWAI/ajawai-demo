@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
-import type { Task } from "@ajawai/shared";
 import { picoClawManager, type Module3Snapshot } from "../agents/picoClaw";
 import { phiSystemStatus } from "../agents/phi";
 import { syncWithSupabase } from "../sync/supabaseSync";
@@ -15,6 +14,8 @@ const initialSnapshot: Module3Snapshot = {
   approvals: [],
   timeline: [],
   memory: [],
+  conversations: [],
+  activeConversationId: null,
   messages: []
 };
 
@@ -41,6 +42,11 @@ export const useAjawaiSystem = (session: Session) => {
     detail: "Pending status check."
   });
   const [phiStatus, setPhiStatus] = useState(phiSystemStatus());
+  const [toast, setToast] = useState<{
+    kind: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+  const prevGmailConnected = useRef<boolean | null>(null);
 
   const refreshSnapshot = useCallback(async () => {
     const next = await picoClawManager.getSnapshot();
@@ -81,14 +87,24 @@ export const useAjawaiSystem = (session: Session) => {
     return () => window.removeEventListener("online", onOnline);
   }, [refreshGmailStatus, syncNow]);
 
+  useEffect(() => {
+    if (prevGmailConnected.current === false && gmailStatus.connected) {
+      setToast({
+        kind: "success",
+        message: "Gmail connected."
+      });
+    }
+    prevGmailConnected.current = gmailStatus.connected;
+  }, [gmailStatus.connected]);
+
   const runCommand = useCallback(
-    async (command: string) => {
+    async (command: string, conversationId: string) => {
       if (!command.trim()) {
         return;
       }
       setBusy(true);
       try {
-        await picoClawManager.executeSecretaryCommand(user.id, command);
+        await picoClawManager.executeSecretaryCommand(user.id, conversationId, command);
         await refreshSnapshot();
       } finally {
         setBusy(false);
@@ -98,88 +114,48 @@ export const useAjawaiSystem = (session: Session) => {
   );
 
   const approve = useCallback(
-    async (approvalId: string) => {
+    async (approvalId: string, conversationId: string) => {
       setBusy(true);
       try {
-        await picoClawManager.approve(approvalId);
+        const result = await picoClawManager.approve(approvalId, conversationId);
+        if (result.kind === "gmail_not_connected") {
+          setToast({
+            kind: "error",
+            message: "Gmail not connected. Opening connect flow."
+          });
+          if (result.connectUrl) {
+            window.open(result.connectUrl, "_blank", "noopener,noreferrer");
+          }
+        } else if (result.ok) {
+          setToast({
+            kind: "success",
+            message:
+              result.kind === "gmail_send_success" ? "Gmail send success." : "Approval completed."
+          });
+        } else {
+          setToast({
+            kind: "error",
+            message: result.message
+          });
+        }
         await refreshSnapshot();
+        await refreshGmailStatus();
       } finally {
         setBusy(false);
       }
     },
-    [refreshSnapshot]
+    [refreshGmailStatus, refreshSnapshot]
   );
 
   const reject = useCallback(
-    async (approvalId: string) => {
+    async (approvalId: string, conversationId: string) => {
       setBusy(true);
       try {
-        await picoClawManager.reject(approvalId);
-        await refreshSnapshot();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshSnapshot]
-  );
-
-  const createProject = useCallback(
-    async (name: string, description: string) => {
-      setBusy(true);
-      try {
-        await picoClawManager.createProjectFromForm(user.id, name, description);
-        await refreshSnapshot();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshSnapshot, user.id]
-  );
-
-  const createTask = useCallback(
-    async (title: string, description: string, priority: Task["priority"]) => {
-      setBusy(true);
-      try {
-        await picoClawManager.createTaskFromForm(title, description, priority);
-        await refreshSnapshot();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshSnapshot]
-  );
-
-  const setTaskStatus = useCallback(
-    async (taskId: string, status: Task["status"]) => {
-      setBusy(true);
-      try {
-        await picoClawManager.setTaskStatus(taskId, status);
-        await refreshSnapshot();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshSnapshot]
-  );
-
-  const createNote = useCallback(
-    async (title: string, content: string) => {
-      setBusy(true);
-      try {
-        await picoClawManager.createNoteFromForm(user.id, title, content);
-        await refreshSnapshot();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshSnapshot, user.id]
-  );
-
-  const createContact = useCallback(
-    async (name: string, email: string, company: string, phone: string) => {
-      setBusy(true);
-      try {
-        await picoClawManager.createContactFromForm({ name, email, company, phone });
+        const result = await picoClawManager.reject(approvalId, conversationId);
+        setToast({
+          kind: result.ok ? "info" : "error",
+          message: result.message
+        });
         await refreshSnapshot();
       } finally {
         setBusy(false);
@@ -192,7 +168,47 @@ export const useAjawaiSystem = (session: Session) => {
     const connectUrl = await picoClawManager.getGmailConnectUrl();
     if (connectUrl) {
       window.open(connectUrl, "_blank", "noopener,noreferrer");
+      setToast({
+        kind: "info",
+        message: "Opened Gmail connect flow."
+      });
+    } else {
+      setToast({
+        kind: "error",
+        message: "Gmail connect URL unavailable. Check relay OAuth configuration."
+      });
     }
+  }, []);
+
+  const createConversation = useCallback(async () => {
+    setBusy(true);
+    try {
+      const conversation = await picoClawManager.createConversation(user.id);
+      await refreshSnapshot();
+      return conversation.id;
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshSnapshot, user.id]);
+
+  const selectConversation = useCallback(
+    async (conversationId: string) => {
+      await picoClawManager.selectConversation(conversationId);
+      await refreshSnapshot();
+    },
+    [refreshSnapshot]
+  );
+
+  const activeConversationId = snapshot.activeConversationId ?? snapshot.conversations[0]?.id ?? null;
+  const activeConversationMessages = useMemo(() => {
+    if (!activeConversationId) {
+      return [];
+    }
+    return snapshot.messages.filter((message) => message.conversation_id === activeConversationId);
+  }, [activeConversationId, snapshot.messages]);
+
+  const clearToast = useCallback(() => {
+    setToast(null);
   }, []);
 
   const logout = useCallback(async () => {
@@ -206,17 +222,18 @@ export const useAjawaiSystem = (session: Session) => {
     syncState,
     gmailStatus,
     phiStatus,
+    toast,
+    activeConversationId,
+    activeConversationMessages,
     runCommand,
     approve,
     reject,
-    createProject,
-    createTask,
-    setTaskStatus,
-    createNote,
-    createContact,
     syncNow,
     refreshGmailStatus,
     connectGmail,
+    createConversation,
+    selectConversation,
+    clearToast,
     logout
   };
 };
