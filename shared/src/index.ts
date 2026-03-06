@@ -182,7 +182,9 @@ export const phiIntentSchema = z.enum([
   "create_contact",
   "create_note",
   "send_email",
-  "search_memory",
+  "save_memory",
+  "recall_memory",
+  "status_query",
   "general"
 ]);
 
@@ -200,7 +202,9 @@ export const phiResponseSchema = z.object({
   email_to: z.array(z.string().email()).optional(),
   email_subject: z.string().optional(),
   email_body: z.string().optional(),
-  memory_query: z.string().optional()
+  memory_query: z.string().optional(),
+  memory_key: z.string().optional(),
+  memory_value: z.string().optional()
 });
 
 export type ToolName = z.infer<typeof toolNameSchema>;
