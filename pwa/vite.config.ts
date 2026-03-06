@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  base: "/ajawai-demo/",
   plugins: [
     react(),
     VitePWA({
@@ -15,7 +16,8 @@ export default defineConfig({
         theme_color: "#111827",
         background_color: "#ffffff",
         display: "standalone",
-        start_url: "/",
+        start_url: "/ajawai-demo/",
+        scope: "/ajawai-demo/",
         icons: [
           {
             src: "icon.svg",
