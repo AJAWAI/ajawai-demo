@@ -31,6 +31,29 @@ const hasGmailCredentials = (config: RelayConfig): boolean => {
   );
 };
 
+export const hasGmailConnection = (config: RelayConfig): boolean => {
+  return hasGmailCredentials(config);
+};
+
+export const getGmailConnectUrl = (config: RelayConfig): string | null => {
+  if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET || !config.GOOGLE_REDIRECT_URI) {
+    return null;
+  }
+  const oauth2Client = new google.auth.OAuth2(
+    config.GOOGLE_CLIENT_ID,
+    config.GOOGLE_CLIENT_SECRET,
+    config.GOOGLE_REDIRECT_URI
+  );
+  return oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: [
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.readonly"
+    ]
+  });
+};
+
 export const sendEmailViaGmail = async (
   config: RelayConfig,
   payload: SendEmailPayload

@@ -1,9 +1,13 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import {
+  PRODUCTION_DASHBOARD_URL,
+  PRODUCTION_LOGIN_URL
+} from "../constants/module3";
 import { supabase } from "../lib/supabase";
 
-const SIGNUP_REDIRECT_URL = "https://ajawai.github.io/ajawai-demo/#/dashboard";
-const PASSWORD_RESET_REDIRECT_URL = "https://ajawai.github.io/ajawai-demo/#/login";
+const SIGNUP_REDIRECT_URL = PRODUCTION_DASHBOARD_URL;
+const PASSWORD_RESET_REDIRECT_URL = PRODUCTION_LOGIN_URL;
 
 export default function Login() {
   const [email, setEmail] = useState("");

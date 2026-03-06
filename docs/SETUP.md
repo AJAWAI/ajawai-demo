@@ -6,6 +6,12 @@ This repository contains:
 - `/relay`: Fastify + TypeScript relay for Gmail send and webhook ingestion
 - `/shared`: shared TypeScript types + zod schemas
 
+Module 3 adds a local-first AI operating system with:
+
+- Secretary Phi (local model in browser)
+- Manager Pico Claw (task/approval/orchestration engine)
+- IndexedDB local schema + optional Supabase sync
+
 ## Prerequisites
 
 - Node.js 20+
@@ -55,10 +61,17 @@ HOST=0.0.0.0
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
+GOOGLE_REDIRECT_URI=
 GMAIL_SENDER=sender@example.com
 ```
 
 If Gmail OAuth variables are missing, `/send/email` returns a successful **stub** response for local demo usage.
+
+For OAuth connect URL endpoint (`/gmail/connect-url`), set:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI`
 
 ## PWA environment variables
 
@@ -104,6 +117,14 @@ curl -X POST http://localhost:8787/webhook/gmail \
   -d '{"message":{"messageId":"123"},"subscription":"gmail-sub"}'
 ```
 
+### `GET /gmail/status`
+
+Returns whether relay has active Gmail credential configuration.
+
+### `GET /gmail/connect-url`
+
+Returns a generated OAuth URL when Google OAuth env vars are configured.
+
 ## Useful scripts
 
 From repo root:
@@ -117,5 +138,8 @@ From repo root:
 ## Notes
 
 - PWA is mobile-first and installable (service worker + web manifest via `vite-plugin-pwa`).
-- Job kernel, approvals, memory, contacts, and timeline are local-first.
-- IndexedDB stores contacts, timeline entries, and memory records.
+- Secretary Phi runs locally in-browser (Transformers.js WebGPU/WASM path + fallback parser).
+- Core app functionality is local-first and available offline except Gmail sending.
+- IndexedDB stores profiles, projects, tasks, contacts, notes, approvals, timeline, memory, and agent messages.
+- Supabase sync is optional and uses last-write-wins (`updated_at`).
+- Supabase Module 3 table SQL is in `docs/supabase/module3_schema.sql`.
