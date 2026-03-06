@@ -135,6 +135,53 @@ const isStatusRequest = (command: string) => {
   );
 };
 
+const normalizeMemoryKey = (raw: string) => {
+  return raw
+    .replace(/\?+$/, "")
+    .replace(/^my\s+/i, "")
+    .trim()
+    .toLowerCase();
+};
+
+const parseMemorySaveFromCommand = (input: string): { key: string; value: string } | null => {
+  const explicit = input.match(/(?:store|save)\s+memory:\s*(.+)$/i);
+  const remember = input.match(/remember(?:\s+that|\s+this)?[:\s]+(.+)$/i);
+  const statement = explicit?.[1] ?? remember?.[1];
+  if (!statement) {
+    return null;
+  }
+
+  const keyValueMatch = statement.match(/^(.+?)\s+is\s+(.+)$/i);
+  if (keyValueMatch) {
+    return {
+      key: normalizeMemoryKey(keyValueMatch[1]),
+      value: keyValueMatch[2].trim().replace(/\.$/, "")
+    };
+  }
+  return {
+    key: "note",
+    value: statement.trim().replace(/\.$/, "")
+  };
+};
+
+const parseMemoryRecallFromCommand = (input: string): string | null => {
+  const trimmed = input.trim();
+  const patterns = [
+    /what is my (.+)\??$/i,
+    /what's my (.+)\??$/i,
+    /what do you know about (.+)\??$/i,
+    /do you remember (.+)\??$/i,
+    /recall (.+)\??$/i
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      return normalizeMemoryKey(match[1]);
+    }
+  }
+  return null;
+};
+
 export class PicoClawManager {
   private activeConversationSettingKey = "active_conversation_id";
 
@@ -261,7 +308,7 @@ export class PicoClawManager {
 
   private async getSystemStatusSummary(userId: string) {
     const gmail = await this.getGmailStatus();
-    const memoryCount = await db.memory.count();
+    const memoryCount = await db.memory.where("user_id").equals(userId).count();
     const profile = await db.profiles.where("user_id").equals(userId).first();
     const modules = [
       "Secretary Phi",
@@ -445,9 +492,10 @@ export class PicoClawManager {
     return note;
   }
 
-  async remember(key: string, value: string) {
+  async remember(userId: string, key: string, value: string) {
     await db.memory.put({
       id: crypto.randomUUID(),
+      user_id: userId,
       key,
       value,
       created_at: nowIso(),
@@ -456,8 +504,9 @@ export class PicoClawManager {
     await this.logTimeline("memory_saved", `Memory saved for "${key}"`, null);
   }
 
-  async searchMemory(query: string) {
-    const rows = await db.memory.orderBy("updated_at").reverse().toArray();
+  async searchMemory(userId: string, query: string) {
+    const rows = await db.memory.where("user_id").equals(userId).toArray();
+    rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     const q = query.toLowerCase();
     return rows.filter((item) => item.key.toLowerCase().includes(q) || item.value.toLowerCase().includes(q));
   }
@@ -726,6 +775,15 @@ export class PicoClawManager {
       content: phiResult.response
     });
 
+    const forcedMemorySave = parseMemorySaveFromCommand(command);
+    const forcedMemoryRecall = parseMemoryRecallFromCommand(command);
+    const effectiveIntent =
+      phiResult.intent === "general" && forcedMemorySave
+        ? "save_memory"
+        : phiResult.intent === "general" && forcedMemoryRecall
+          ? "recall_memory"
+          : phiResult.intent;
+
     let outcome: CommandOutcome = {
       type: "action_completed",
       ok: true,
@@ -733,7 +791,7 @@ export class PicoClawManager {
     };
 
     try {
-      if (isStatusRequest(command)) {
+      if (effectiveIntent === "status_query" || isStatusRequest(command)) {
         const statusSummary = await this.getSystemStatusSummary(userId);
         await this.logTimeline("status_checked", "System status requested by President.", null);
         await this.addMessage({
@@ -748,7 +806,7 @@ export class PicoClawManager {
           summary: statusSummary
         };
       } else {
-        switch (phiResult.intent) {
+        switch (effectiveIntent) {
           case "create_project": {
             const projectName = safeText(phiResult.project_name, "Untitled Project");
             const project = await this.createProject(userId, projectName, phiResult.summary);
@@ -893,18 +951,50 @@ export class PicoClawManager {
             };
             break;
           }
-          case "search_memory": {
-            const query = safeText(phiResult.memory_query, command);
-            const matches = await this.searchMemory(query);
-            const summary = matches.length
-              ? `Found ${matches.length} memory item(s) for "${query}".`
-              : `No memory matches for "${query}" yet.`;
-            await this.logTimeline("memory_search", summary, null);
+          case "save_memory": {
+            const key = safeText(phiResult.memory_key, forcedMemorySave?.key ?? "note");
+            const value = safeText(phiResult.memory_value, forcedMemorySave?.value ?? command);
+            await this.remember(userId, key, value);
+            await this.addMessage({
+              conversationId,
+              role: "manager_pico",
+              type: "memory_saved_card",
+              content: `Memory saved: ${key}.`,
+              payload: { key, value }
+            });
             outcome = {
-              type: "informational_answer",
+              type: "memory_saved",
               ok: true,
-              summary
+              summary: `Stored memory "${key}" as "${value}".`
             };
+            break;
+          }
+          case "recall_memory": {
+            const query = safeText(phiResult.memory_query, forcedMemoryRecall ?? command);
+            const matches = await this.searchMemory(userId, query);
+            if (matches.length > 0) {
+              const exact = matches.find((item) => item.key === query) ?? matches[0];
+              outcome = {
+                type: "informational_answer",
+                ok: true,
+                summary: `Your ${exact.key} is ${exact.value}.`,
+                details: {
+                  key: exact.key,
+                  value: exact.value
+                }
+              };
+            } else {
+              outcome = {
+                type: "informational_answer",
+                ok: true,
+                summary: "I do not have that stored yet."
+              };
+            }
+            await this.logTimeline(
+              "memory_search",
+              `Memory recall attempted for query "${query}".`,
+              null
+            );
             break;
           }
           case "send_email": {
@@ -984,20 +1074,7 @@ export class PicoClawManager {
         }
       }
 
-      await this.remember("last_command", command);
-      if (command.toLowerCase().includes("remember")) {
-        await this.addMessage({
-          conversationId,
-          role: "manager_pico",
-          type: "memory_saved_card",
-          content: "Memory saved locally."
-        });
-        outcome = {
-          type: "memory_saved",
-          ok: true,
-          summary: "Your memory instruction was stored locally."
-        };
-      }
+      await this.remember(userId, "last_command", command);
     } catch (error) {
       outcome = {
         type: "error_failure",

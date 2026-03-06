@@ -11,6 +11,7 @@ import type {
 
 export interface MemoryEntry {
   id: string;
+  user_id: string;
   key: string;
   value: string;
   created_at: string;
@@ -74,7 +75,7 @@ class AjawaiDb extends Dexie {
 
   constructor() {
     super("ajawai-demo-db");
-    this.version(3).stores({
+    this.version(4).stores({
       profiles: "id, user_id, updated_at",
       projects: "id, owner_id, status, updated_at",
       tasks: "id, project_id, status, priority, requires_approval, updated_at",
@@ -82,7 +83,7 @@ class AjawaiDb extends Dexie {
       notes: "id, user_id, project_id, updated_at",
       approvals: "id, action_type, status, updated_at",
       timeline: "id, event_type, project_id, updated_at",
-      memory: "id, key, updated_at",
+      memory: "id, user_id, key, updated_at",
       conversations: "id, user_id, last_message_at, updated_at",
       messages: "id, conversation_id, role, type, created_at",
       settings: "key, updated_at"

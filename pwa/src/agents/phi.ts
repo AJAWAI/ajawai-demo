@@ -28,10 +28,97 @@ const jsonFromText = (text: string): unknown | null => {
   }
 };
 
+const normalizeMemoryKey = (raw: string) => {
+  return raw
+    .replace(/\?+$/, "")
+    .replace(/^my\s+/i, "")
+    .trim()
+    .toLowerCase();
+};
+
+const parseMemorySave = (input: string): { key: string; value: string } | null => {
+  const explicit = input.match(/(?:store|save)\s+memory:\s*(.+)$/i);
+  const remember = input.match(/remember(?:\s+that|\s+this)?[:\s]+(.+)$/i);
+  const statement = explicit?.[1] ?? remember?.[1];
+  if (!statement) {
+    return null;
+  }
+  const keyValueMatch = statement.match(/^(.+?)\s+is\s+(.+)$/i);
+  if (keyValueMatch) {
+    const key = normalizeMemoryKey(keyValueMatch[1]);
+    const value = keyValueMatch[2].trim().replace(/\.$/, "");
+    if (key && value) {
+      return { key, value };
+    }
+  }
+  return {
+    key: "note",
+    value: statement.trim().replace(/\.$/, "")
+  };
+};
+
+const parseMemoryRecall = (input: string): string | null => {
+  const trimmed = input.trim();
+  const patterns = [
+    /what is my (.+)\??$/i,
+    /what's my (.+)\??$/i,
+    /what do you know about (.+)\??$/i,
+    /do you remember (.+)\??$/i,
+    /recall (.+)\??$/i,
+    /tell me about (.+)\??$/i
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      return normalizeMemoryKey(match[1]);
+    }
+  }
+  if (trimmed.toLowerCase().includes("memory")) {
+    return normalizeMemoryKey(trimmed);
+  }
+  return null;
+};
+
 const heuristicPhi = (prompt: string): PhiResponse => {
   const normalized = prompt.trim();
   const lower = normalized.toLowerCase();
   const emailMatches = normalized.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+
+  const memorySave = parseMemorySave(normalized);
+  if (memorySave) {
+    return phiResponseSchema.parse({
+      intent: "save_memory",
+      summary: "Memory save intent identified.",
+      response: `${SECRETARY_NAME} is storing this memory now.`,
+      requires_approval: false,
+      memory_key: memorySave.key,
+      memory_value: memorySave.value
+    });
+  }
+
+  const memoryRecall = parseMemoryRecall(normalized);
+  if (memoryRecall) {
+    return phiResponseSchema.parse({
+      intent: "recall_memory",
+      summary: "Memory recall intent identified.",
+      response: `${SECRETARY_NAME} is checking memory for that.`,
+      requires_approval: false,
+      memory_query: memoryRecall
+    });
+  }
+
+  if (
+    lower.includes("system status") ||
+    lower.includes("confirm the system is running") ||
+    lower.includes("show current system status")
+  ) {
+    return phiResponseSchema.parse({
+      intent: "status_query",
+      summary: "System status request identified.",
+      response: `${SECRETARY_NAME} is gathering current system status.`,
+      requires_approval: false
+    });
+  }
 
   if (lower.includes("email") || lower.includes("send")) {
     const recipients = emailMatches.length > 0 ? emailMatches : ["recipient@example.com"];
@@ -98,17 +185,6 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     return phiResponseSchema.parse(response);
   }
 
-  if (lower.includes("memory") || lower.includes("remember")) {
-    const response = {
-      intent: "search_memory",
-      summary: "Memory lookup intent identified.",
-      response: `${SECRETARY_NAME} is searching memory now.`,
-      requires_approval: false,
-      memory_query: normalized
-    };
-    return phiResponseSchema.parse(response);
-  }
-
   return phiResponseSchema.parse({
     intent: "general",
     summary: "General request interpreted.",
@@ -171,8 +247,8 @@ const buildPrompt = (prompt: string) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Return JSON only with keys:",
-    "intent, summary, response, requires_approval, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, memory_query.",
-    "Choose intent from create_project, create_task, create_contact, create_note, send_email, search_memory, general.",
+    "intent, summary, response, requires_approval, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, memory_query, memory_key, memory_value.",
+    "Choose intent from create_project, create_task, create_contact, create_note, send_email, save_memory, recall_memory, status_query, general.",
     "If action sends email, set requires_approval true.",
     `User request: ${prompt}`
   ].join("\n");
