@@ -27,6 +27,7 @@ export default function Dashboard({ session }: DashboardProps) {
     busy,
     snapshot,
     syncState,
+    pendingSync,
     gmailStatus,
     phiStatus,
     toast,
@@ -490,7 +491,13 @@ export default function Dashboard({ session }: DashboardProps) {
               </div>
               {syncState && (
                 <small>
-                  {syncState.detail} • {new Date(syncState.at).toLocaleTimeString()}
+                  Sync: {syncState.state.replaceAll("_", " ")} • {syncState.detail} •{" "}
+                  {new Date(syncState.at).toLocaleTimeString()}
+                </small>
+              )}
+              {!syncState && (
+                <small>
+                  Sync: {pendingSync ? "pending sync" : "offline cache only"}
                 </small>
               )}
             </article>

@@ -177,14 +177,17 @@ export const timelineSchema = z.object({
 });
 
 export const phiIntentSchema = z.enum([
-  "create_project",
-  "create_task",
-  "create_contact",
-  "create_note",
-  "send_email",
-  "save_memory",
-  "recall_memory",
+  "conversational",
   "status_query",
+  "memory_save",
+  "memory_recall",
+  "task_request",
+  "project_request",
+  "note_request",
+  "contact_request",
+  "approval_request",
+  "integration_request",
+  "external_action_request",
   "general"
 ]);
 
@@ -199,6 +202,7 @@ export const phiResponseSchema = z.object({
   note_content: z.string().optional(),
   contact_name: z.string().optional(),
   contact_email: z.string().optional(),
+  action: z.string().optional(),
   email_to: z.array(z.string().email()).optional(),
   email_subject: z.string().optional(),
   email_body: z.string().optional(),
