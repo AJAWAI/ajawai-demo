@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@ajawai/shared": "1.0.0",
+    "@huggingface/transformers": "^3.8.1",
     "@supabase/supabase-js": "^2.98.0",
     "dexie": "^4.2.0",
     "react": "^19.1.1",

@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
 import { getConfig } from "./config";
-import { sendEmailViaGmail } from "./gmail";
+import { getGmailConnectUrl, hasGmailConnection, sendEmailViaGmail } from "./gmail";
 
 const config = getConfig();
 
@@ -40,6 +40,32 @@ app.get("/health", async () => {
     ok: true,
     service: "ajawai-relay",
     time: new Date().toISOString()
+  };
+});
+
+app.get("/gmail/status", async () => {
+  const connected = hasGmailConnection(config);
+  return {
+    connected,
+    mode: connected ? "live" : "stub",
+    detail: connected
+      ? "Relay configured with Gmail credentials."
+      : "Gmail credentials missing. Relay runs in stub mode."
+  };
+});
+
+app.get("/gmail/connect-url", async (_request, reply) => {
+  const connectUrl = getGmailConnectUrl(config);
+  if (!connectUrl) {
+    return reply.status(503).send({
+      ok: false,
+      error:
+        "OAuth URL unavailable. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI."
+    });
+  }
+  return {
+    ok: true,
+    connect_url: connectUrl
   };
 });
 

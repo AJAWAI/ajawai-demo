@@ -9,6 +9,9 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["icon.svg"],
+      workbox: {
+        maximumFileSizeToCacheInBytes: 30 * 1024 * 1024
+      },
       manifest: {
         name: "AJAWAI Demo",
         short_name: "AJAWAI",

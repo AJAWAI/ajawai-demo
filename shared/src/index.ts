@@ -3,7 +3,8 @@ import { z } from "zod";
 export const toolNameSchema = z.enum([
   "memory.save",
   "memory.search",
-  "relay.send_email"
+  "relay.send_email",
+  "gmail.connect"
 ]);
 
 export const toolCallSchema = z.object({
@@ -75,6 +76,133 @@ export const approvalRequestSchema = z.object({
   resolvedAt: z.string().datetime().optional()
 });
 
+export const projectStatusSchema = z.enum([
+  "planning",
+  "active",
+  "on_hold",
+  "completed"
+]);
+
+export const taskStatusSchema = z.enum([
+  "todo",
+  "in_progress",
+  "blocked",
+  "done"
+]);
+
+export const taskPrioritySchema = z.enum([
+  "low",
+  "medium",
+  "high"
+]);
+
+export const approvalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected"
+]);
+
+export const profileSchema = z.object({
+  id: z.string().min(1),
+  user_id: z.string().min(1),
+  full_name: z.string().default(""),
+  company: z.string().default(""),
+  role: z.string().default("President"),
+  timezone: z.string().default("UTC"),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const projectSchema = z.object({
+  id: z.string().min(1),
+  owner_id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().default(""),
+  status: projectStatusSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const taskSchema = z.object({
+  id: z.string().min(1),
+  project_id: z.string().nullable(),
+  title: z.string().min(1),
+  description: z.string().default(""),
+  status: taskStatusSchema,
+  priority: taskPrioritySchema,
+  requires_approval: z.boolean(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const contactSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  company: z.string().default(""),
+  email: z.string().email(),
+  phone: z.string().default(""),
+  notes: z.string().default(""),
+  project_id: z.string().nullable(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const noteSchema = z.object({
+  id: z.string().min(1),
+  user_id: z.string().min(1),
+  title: z.string().min(1),
+  content: z.string().min(1),
+  project_id: z.string().nullable(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const approvalSchema = z.object({
+  id: z.string().min(1),
+  action_type: z.string().min(1),
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  created_at: z.string().datetime(),
+  approved_at: z.string().datetime().nullable(),
+  updated_at: z.string().datetime()
+});
+
+export const timelineSchema = z.object({
+  id: z.string().min(1),
+  event_type: z.string().min(1),
+  description: z.string().min(1),
+  project_id: z.string().nullable(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const phiIntentSchema = z.enum([
+  "create_project",
+  "create_task",
+  "create_contact",
+  "create_note",
+  "send_email",
+  "search_memory",
+  "general"
+]);
+
+export const phiResponseSchema = z.object({
+  intent: phiIntentSchema,
+  summary: z.string().min(1),
+  response: z.string().min(1),
+  requires_approval: z.boolean().default(false),
+  project_name: z.string().optional(),
+  task_title: z.string().optional(),
+  note_title: z.string().optional(),
+  note_content: z.string().optional(),
+  contact_name: z.string().optional(),
+  contact_email: z.string().optional(),
+  email_to: z.array(z.string().email()).optional(),
+  email_subject: z.string().optional(),
+  email_body: z.string().optional(),
+  memory_query: z.string().optional()
+});
+
 export type ToolName = z.infer<typeof toolNameSchema>;
 export type ToolCall = z.infer<typeof toolCallSchema>;
 export type ToolResult = z.infer<typeof toolResultSchema>;
@@ -83,3 +211,16 @@ export type JobStepStatus = z.infer<typeof jobStepStatusSchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 export type Job = z.infer<typeof jobSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
+export type ProjectStatus = z.infer<typeof projectStatusSchema>;
+export type TaskStatus = z.infer<typeof taskStatusSchema>;
+export type TaskPriority = z.infer<typeof taskPrioritySchema>;
+export type ApprovalStatus = z.infer<typeof approvalStatusSchema>;
+export type Profile = z.infer<typeof profileSchema>;
+export type Project = z.infer<typeof projectSchema>;
+export type Task = z.infer<typeof taskSchema>;
+export type Contact = z.infer<typeof contactSchema>;
+export type Note = z.infer<typeof noteSchema>;
+export type Approval = z.infer<typeof approvalSchema>;
+export type Timeline = z.infer<typeof timelineSchema>;
+export type PhiIntent = z.infer<typeof phiIntentSchema>;
+export type PhiResponse = z.infer<typeof phiResponseSchema>;
