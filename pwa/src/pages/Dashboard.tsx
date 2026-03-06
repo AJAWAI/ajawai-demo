@@ -686,6 +686,11 @@ export default function Dashboard({ session }: DashboardProps) {
                 Sync state: {syncDebugLabel} • Last success: {lastSuccessLabel}
               </p>
               <small>{syncDebugDetail}</small>
+              <p>
+                Model: {phiStatus.runtime} • Ready: {phiStatus.model_ready ? "yes" : "no"} • Last
+                mode: {phiStatus.llm_mode} • LLM called: {phiStatus.llm_called ? "yes" : "no"}
+              </p>
+              {phiStatus.model_load_error ? <small>{phiStatus.model_load_error}</small> : null}
               <ul className="os-list">
                 {debugTraces.map((trace, index) => (
                   <li key={`${trace.at}-${index}`} className="os-list-item">

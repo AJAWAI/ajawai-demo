@@ -45,6 +45,9 @@ const now = () => new Date().toISOString();
 
 let generatorPromise: Promise<GeneratorFn | null> | null = null;
 let runtimeState: RuntimeState = "initializing";
+let lastModelError: string | null = null;
+let lastInitAttemptAt = 0;
+const MODEL_RETRY_COOLDOWN_MS = 12_000;
 let lastPhiDebugMeta: PhiDebugMeta = {
   mode: "heuristic",
   usedWeakRepair: false,
@@ -929,7 +932,13 @@ const heuristicPhi = (prompt: string): PhiResponse => {
 };
 
 const initializeLocalPhi = async (): Promise<GeneratorFn | null> => {
+  const nowMs = Date.now();
+  if (runtimeState === "fallback" && nowMs - lastInitAttemptAt < MODEL_RETRY_COOLDOWN_MS) {
+    return null;
+  }
+
   if (!generatorPromise) {
+    lastInitAttemptAt = nowMs;
     generatorPromise = (async () => {
       try {
         const transformers = (await import("@huggingface/transformers")) as unknown as {
@@ -956,6 +965,7 @@ const initializeLocalPhi = async (): Promise<GeneratorFn | null> => {
             }
           );
           runtimeState = "ready";
+          lastModelError = null;
           return webgpuGenerator;
         } catch {
           const wasmGenerator = await transformers.pipeline(
@@ -966,11 +976,17 @@ const initializeLocalPhi = async (): Promise<GeneratorFn | null> => {
             }
           );
           runtimeState = "ready";
+          lastModelError = null;
           return wasmGenerator;
         }
-      } catch {
+      } catch (error) {
         runtimeState = "fallback";
+        lastModelError = error instanceof Error ? error.message : "Model initialization failed.";
         return null;
+      } finally {
+        if (runtimeState === "fallback") {
+          generatorPromise = null;
+        }
       }
     })();
   }
@@ -1101,9 +1117,7 @@ export const phiTranslateRequest = async (
     const translatedCandidate = cleanTranslatedText(
       fromModel ?? backupFromLLM?.split("\n")[0] ?? ""
     );
-    const translated = translatedCandidate
-      ? translatedCandidate
-      : "[Translation currently unavailable]";
+    const translated = translatedCandidate || cleanTranslatedText(phrase);
     translatedRows.push({
       source: ensureQuestionPunctuation(phrase),
       translated
@@ -1161,7 +1175,21 @@ const buildConciseFallbackAnswer = (prompt: string) => {
   if (lower.includes("self-improve") || lower.includes("inspire me")) {
     return buildSelfImproveReply();
   }
-  return "I’m having trouble using the local reasoning model right now. Please retry your question in a moment.";
+  if (lower.includes("future of ai") || lower.includes("future of artificial intelligence")) {
+    return [
+      "The future of AI will likely combine stronger reasoning, safer deployment, and deep integration into daily work.",
+      "AI systems will become better collaborators, but human judgment, taste, and ethics will matter even more.",
+      "The biggest advantage will go to people who can pair domain expertise with disciplined AI use."
+    ].join(" ");
+  }
+  if (lower.includes("what is life") || lower.includes("need inspiration")) {
+    return [
+      "Life can feel uncertain, but meaning usually comes from three things: growth, contribution, and relationships.",
+      "You do not need a perfect plan — just one honest next step you can take today.",
+      "Progress and purpose are built by consistent action, not by waiting for perfect clarity."
+    ].join(" ");
+  }
+  return buildFriendlyConversationalReply(prompt);
 };
 
 const looksLikePromptEcho = (prompt: string, response: string) => {
@@ -1294,112 +1322,24 @@ export const phiLLM = async (
     return deterministic;
   }
 
-  const generator = await initializeLocalPhi();
-  if (!generator) {
-    markPhiDebug({
-      mode: "heuristic",
-      usedWeakRepair: false,
-      usedSearchHeuristic: Boolean(deterministic.needs_web_search),
-      llmCalled: false,
-      normalizedPrompt
-    });
-    return deterministic;
-  }
-
-  try {
-    const generateDirectAnswer = async () => {
-      const directOutput = await generator(buildDirectAnswerPrompt(normalizedPrompt, history), {
-        max_new_tokens: 420,
-        temperature: 0.45,
-        return_full_text: false
-      });
-      return sanitizeModelAnswer(directOutput[0]?.generated_text ?? "");
-    };
-
-    const output = await generator(buildPrompt(normalizedPrompt, history), {
-      max_new_tokens: 256,
-      temperature: 0.2,
-      return_full_text: false
-    });
-
-    const text = output[0]?.generated_text ?? "";
-    const candidate = jsonFromText(text);
-    const parsed = phiResponseSchema.safeParse(candidate);
-    if (parsed.success) {
-      const modelResult = parsed.data;
-      if (modelResult.intent === "conversational" || modelResult.intent === "general") {
-        let directResponse = sanitizeModelAnswer(modelResult.response);
-        let usedWeakRepair = false;
-        if (!directResponse || looksLikeWeakReply(directResponse)) {
-          const generated = await generateDirectAnswer().catch(() => "");
-          directResponse =
-            generated && !looksLikeWeakReply(generated) ? generated : deterministic.response;
-          usedWeakRepair = true;
-        }
-        markPhiDebug({
-          mode: usedWeakRepair ? "model_with_fallback" : "model",
-          usedWeakRepair,
-          usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-          llmCalled: true,
-          normalizedPrompt
-        });
-        return phiResponseSchema.parse({
-          ...modelResult,
-          intent: "conversational",
-          summary: "Conversational request handled directly by Secretary Phi.",
-          response: directResponse,
-          needs_web_search: shouldUseWebSearch(normalizedPrompt),
-          web_search_query: shouldUseWebSearch(normalizedPrompt) ? normalizedPrompt : undefined,
-          requires_approval: false
-        });
-      }
-      markPhiDebug({
-        mode: "model",
-        usedWeakRepair: false,
-        usedSearchHeuristic: Boolean(modelResult.needs_web_search),
-        llmCalled: true,
-        normalizedPrompt
-      });
-      return modelResult;
-    }
-    const generated = await generateDirectAnswer().catch(() => "");
-    if (generated && !looksLikeWeakReply(generated)) {
-      markPhiDebug({
-        mode: "model_with_fallback",
-        usedWeakRepair: true,
-        usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-        llmCalled: true,
-        normalizedPrompt
-      });
-      return phiResponseSchema.parse({
-        ...deterministic,
-        intent: "conversational",
-        summary: "Conversational request handled directly by Secretary Phi.",
-        response: generated,
-        needs_web_search: shouldUseWebSearch(normalizedPrompt),
-        web_search_query: shouldUseWebSearch(normalizedPrompt) ? normalizedPrompt : undefined,
-        requires_approval: false
-      });
-    }
-    markPhiDebug({
-      mode: "heuristic",
-      usedWeakRepair: true,
-      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-      llmCalled: true,
-      normalizedPrompt
-    });
-    return deterministic;
-  } catch {
-    runtimeState = "fallback";
-    markPhiDebug({
-      mode: "heuristic",
-      usedWeakRepair: true,
-      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-      llmCalled: true,
-      normalizedPrompt
-    });
-    return deterministic;
-  }
+  const directResponse = await phiDirectAnswer(normalizedPrompt, { history });
+  const weak = looksLikeWeakReply(directResponse) || looksLikePromptEcho(normalizedPrompt, directResponse);
+  markPhiDebug({
+    mode: weak ? "model_with_fallback" : "model",
+    usedWeakRepair: weak,
+    usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
+    llmCalled: true,
+    normalizedPrompt
+  });
+  return phiResponseSchema.parse({
+    ...deterministic,
+    intent: "conversational",
+    summary: "Conversational request handled directly by Secretary Phi.",
+    response: directResponse,
+    needs_web_search: shouldUseWebSearch(normalizedPrompt),
+    web_search_query: shouldUseWebSearch(normalizedPrompt) ? normalizedPrompt : undefined,
+    requires_approval: false
+  });
 };
 
 export const phiSystemStatus = () => {
@@ -1407,6 +1347,11 @@ export const phiSystemStatus = () => {
     name: SECRETARY_NAME,
     runtime: runtimeState,
     model: LOCAL_PHI_MODEL,
+    model_ready: runtimeState === "ready",
+    model_load_error: lastModelError,
+    llm_called: lastPhiDebugMeta.llmCalled,
+    llm_mode: lastPhiDebugMeta.mode,
+    normalized_prompt: lastPhiDebugMeta.normalizedPrompt,
     checked_at: now()
   };
 };
