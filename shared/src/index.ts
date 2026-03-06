@@ -178,6 +178,7 @@ export const timelineSchema = z.object({
 
 export const phiIntentSchema = z.enum([
   "conversational",
+  "translation_request",
   "status_query",
   "memory_save",
   "memory_recall",
@@ -208,6 +209,8 @@ export const phiResponseSchema = z.object({
   email_body: z.string().optional(),
   needs_web_search: z.boolean().optional(),
   web_search_query: z.string().optional(),
+  translation_target_language: z.string().optional(),
+  translation_phrases: z.array(z.string()).optional(),
   memory_query: z.string().optional(),
   memory_key: z.string().optional(),
   memory_value: z.string().optional()

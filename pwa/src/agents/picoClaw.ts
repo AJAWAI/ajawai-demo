@@ -20,6 +20,7 @@ import {
   getLastPhiDebugMeta,
   phiDirectAnswer,
   phiLLM,
+  phiTranslateRequest,
   phiSynthesizeSearchAnswer,
   type ConversationTurn
 } from "./phi";
@@ -84,6 +85,7 @@ export interface CommandDebugInfo {
   intent: string;
   route:
     | "direct_conversational"
+    | "translation_direct"
     | "memory_recall"
     | "memory_save"
     | "search_assisted_conversational"
@@ -780,6 +782,18 @@ export class PicoClawManager {
     };
   }
 
+  private isTranslationOutputValid(answer: string) {
+    const normalized = answer.toLowerCase();
+    const hasArrow = answer.includes("->") || answer.includes("→");
+    const hasSourceNoise =
+      normalized.includes("wikipedia") ||
+      normalized.includes("duckduckgo") ||
+      normalized.includes("source") ||
+      normalized.includes("http://") ||
+      normalized.includes("https://");
+    return hasArrow && !hasSourceNoise;
+  }
+
   async approve(approvalId: string, conversationId: string): Promise<ActionResult> {
     const resolvedConversationId = await this.resolveConversationId(conversationId);
     const approval = await db.approvals.get(approvalId);
@@ -1186,6 +1200,20 @@ export class PicoClawManager {
             };
             break;
           }
+          case "translation_request": {
+            debug.route = "translation_direct";
+            const translation = await phiTranslateRequest(
+              command,
+              phiResult.translation_target_language,
+              phiResult.translation_phrases
+            );
+            outcome = {
+              type: "informational_answer",
+              ok: true,
+              summary: translation
+            };
+            break;
+          }
           case "memory_save": {
             debug.route = "memory_save";
             debug.memory_used = true;
@@ -1414,7 +1442,19 @@ export class PicoClawManager {
     }
 
     let finalResponse = this.buildSecretaryFinalResponse(outcome);
-    if (debug.route === "direct_conversational" || debug.route === "search_assisted_conversational") {
+    if (debug.route === "translation_direct") {
+      if (!this.isTranslationOutputValid(finalResponse)) {
+        finalResponse = await phiTranslateRequest(
+          command,
+          phiResult.translation_target_language,
+          phiResult.translation_phrases
+        );
+        debug.quality_guard_triggered = true;
+      }
+    } else if (
+      debug.route === "direct_conversational" ||
+      debug.route === "search_assisted_conversational"
+    ) {
       const guarded = await this.ensureDirectAnswerQuality(command, finalResponse, history);
       finalResponse = guarded.answer;
       debug.quality_guard_triggered = guarded.repaired;

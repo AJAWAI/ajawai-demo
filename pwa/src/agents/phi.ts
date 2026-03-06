@@ -183,6 +183,189 @@ const extractTopicFromQuestion = (prompt: string) => {
   return match?.[1]?.trim() ?? cleaned;
 };
 
+type SupportedTranslationLanguage = "spanish" | "french" | "english";
+
+interface TranslationIntent {
+  targetLanguage: SupportedTranslationLanguage;
+  phrases: string[];
+}
+
+const translationLanguageAliases: Array<{
+  alias: string;
+  language: SupportedTranslationLanguage;
+}> = [
+  { alias: "spanish", language: "spanish" },
+  { alias: "espanol", language: "spanish" },
+  { alias: "español", language: "spanish" },
+  { alias: "french", language: "french" },
+  { alias: "francais", language: "french" },
+  { alias: "français", language: "french" },
+  { alias: "english", language: "english" },
+  { alias: "inglés", language: "english" },
+  { alias: "ingles", language: "english" }
+];
+
+const normalizeTranslationPhrase = (value: string) => {
+  return value
+    .toLowerCase()
+    .replace(/\bwhat did you to do\b/g, "what did you do")
+    .replace(/\bhow say\b/g, "how do you say")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const translationDictionary: Record<SupportedTranslationLanguage, Record<string, string>> = {
+  spanish: {
+    "how are you": "¿Cómo estás?",
+    "what did you do today": "¿Qué hiciste hoy?",
+    "where are you from": "¿De dónde eres?",
+    "what are you doing": "¿Qué estás haciendo?",
+    "good morning": "Buenos días.",
+    "see you tomorrow": "Hasta mañana.",
+    "how is your mom": "¿Cómo está tu mamá?",
+    "how is your mother": "¿Cómo está tu madre?"
+  },
+  french: {
+    "how are you": "Comment ça va ?",
+    "what did you do today": "Qu’as-tu fait aujourd’hui ?",
+    "where are you from": "D’où viens-tu ?",
+    "what are you doing": "Que fais-tu ?",
+    "good morning": "Bonjour.",
+    "see you tomorrow": "À demain.",
+    "how is your mom": "Comment va ta maman ?",
+    "how is your mother": "Comment va votre mère ?"
+  },
+  english: {
+    "como estas": "How are you?",
+    "qué hiciste hoy": "What did you do today?",
+    "de donde eres": "Where are you from?",
+    "que estas haciendo": "What are you doing?",
+    "buenos dias": "Good morning.",
+    "hasta manana": "See you tomorrow.",
+    "bonjour": "Good morning.",
+    "a demain": "See you tomorrow."
+  }
+};
+
+const detectTargetLanguage = (prompt: string): SupportedTranslationLanguage | null => {
+  const lower = prompt.toLowerCase();
+  let bestMatch: { index: number; language: SupportedTranslationLanguage } | null = null;
+  for (const entry of translationLanguageAliases) {
+    const idx = lower.lastIndexOf(entry.alias.toLowerCase());
+    if (idx >= 0 && (!bestMatch || idx > bestMatch.index)) {
+      bestMatch = { index: idx, language: entry.language };
+    }
+  }
+  return bestMatch?.language ?? null;
+};
+
+const splitTranslationPhrases = (input: string): string[] => {
+  const normalized = input
+    .replace(/\bwhat did you to do\b/gi, "what did you do")
+    .replace(/\bin\?\s*/gi, "? ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const chunks = normalized
+    .split(/\?|\.|;|,(?!\d)|\band\b|\&|\n/gi)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0)
+    .map((chunk) =>
+      chunk
+        .replace(/^(translate|say|how do you say|how say)\s+/i, "")
+        .replace(/\s+(in|into|to)\s+(spanish|espanol|español|french|francais|français|english|ingles|inglés)\s*$/i, "")
+        .trim()
+    )
+    .filter((chunk) => chunk.length > 0);
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const chunk of chunks) {
+    const key = normalizeTranslationPhrase(chunk);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(chunk.replace(/\?+$/, "").trim());
+  }
+  return deduped;
+};
+
+export const parseTranslationIntent = (prompt: string): TranslationIntent | null => {
+  const lower = prompt.toLowerCase().trim();
+  const hasTranslateSignal =
+    lower.includes("translate") ||
+    lower.includes("how do you say") ||
+    lower.includes("how say") ||
+    /\b(say)\b/.test(lower) ||
+    /\b(spanish|french|english)\s+for\b/.test(lower);
+  if (!hasTranslateSignal) {
+    return null;
+  }
+
+  const targetLanguage = detectTargetLanguage(prompt);
+  if (!targetLanguage) {
+    return null;
+  }
+
+  const languageForPattern = new RegExp(
+    `\\b(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)\\s+for\\s+(.+)$`,
+    "i"
+  );
+  const explicitForMatch = prompt.match(languageForPattern);
+  const howDoYouSayPattern = new RegExp(
+    `how\\s*(?:do\\s*you\\s*)?say\\s+(.+?)\\s+(?:in|into|to)\\s+(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)`,
+    "i"
+  );
+  const howDoYouSayMatch = prompt.match(howDoYouSayPattern);
+  const translatePattern = new RegExp(
+    `translate\\s+(.+?)\\s+(?:in|into|to)\\s+(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)`,
+    "i"
+  );
+  const translateMatch = prompt.match(translatePattern);
+  const sayPattern = new RegExp(
+    `say\\s+(.+?)\\s+(?:in|into|to)\\s+(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)`,
+    "i"
+  );
+  const sayMatch = prompt.match(sayPattern);
+
+  const sourceText =
+    explicitForMatch?.[1] ??
+    howDoYouSayMatch?.[1] ??
+    translateMatch?.[1] ??
+    sayMatch?.[1] ??
+    prompt;
+
+  const phrases = splitTranslationPhrases(sourceText);
+  if (phrases.length === 0) {
+    return null;
+  }
+
+  return {
+    targetLanguage,
+    phrases
+  };
+};
+
+const translatePhraseFromDictionary = (
+  phrase: string,
+  targetLanguage: SupportedTranslationLanguage
+) => {
+  const normalized = normalizeTranslationPhrase(phrase);
+  const dictionary = translationDictionary[targetLanguage];
+  return dictionary?.[normalized] ?? null;
+};
+
+const languageLabel = (language: SupportedTranslationLanguage) => {
+  if (language === "spanish") {
+    return "Spanish";
+  }
+  if (language === "french") {
+    return "French";
+  }
+  return "English";
+};
+
 const currentInfoPatterns = [
   /\bnet worth\b/i,
   /\bbillionaire\b/i,
@@ -208,6 +391,9 @@ export const shouldUseWebSearch = (prompt: string) => {
   const normalized = prompt.trim();
   const lower = normalized.toLowerCase();
   if (lower.length < 3) {
+    return false;
+  }
+  if (parseTranslationIntent(normalized)) {
     return false;
   }
   if (lower.includes("remember that") || lower.includes("store memory")) {
@@ -572,6 +758,19 @@ const heuristicPhi = (prompt: string): PhiResponse => {
     });
   }
 
+  const translationIntent = parseTranslationIntent(normalized);
+  if (translationIntent) {
+    return phiResponseSchema.parse({
+      intent: "translation_request",
+      summary: `Translation request identified (${languageLabel(translationIntent.targetLanguage)}).`,
+      response: `I can translate that into ${languageLabel(translationIntent.targetLanguage)} right away.`,
+      requires_approval: false,
+      needs_web_search: false,
+      translation_target_language: translationIntent.targetLanguage,
+      translation_phrases: translationIntent.phrases
+    });
+  }
+
   if (
     lower.includes("system status") ||
     lower.includes("confirm the system is running") ||
@@ -756,8 +955,8 @@ const buildPrompt = (prompt: string, history: ConversationTurn[]) => {
   return [
     "You are Secretary Phi in AJAWAI.",
     "Return JSON only with keys:",
-    "intent, summary, response, requires_approval, action, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, needs_web_search, web_search_query, memory_query, memory_key, memory_value.",
-    "Choose intent from conversational, status_query, memory_save, memory_recall, task_request, project_request, note_request, contact_request, approval_request, integration_request, external_action_request, general.",
+    "intent, summary, response, requires_approval, action, project_name, task_title, note_title, note_content, contact_name, contact_email, email_to, email_subject, email_body, needs_web_search, web_search_query, translation_target_language, translation_phrases, memory_query, memory_key, memory_value.",
+    "Choose intent from conversational, translation_request, status_query, memory_save, memory_recall, task_request, project_request, note_request, contact_request, approval_request, integration_request, external_action_request, general.",
     "For normal questions, give a complete direct helpful response immediately in response.",
     "Do not ask for constraints unless absolutely required.",
     "Avoid filler language.",
@@ -776,6 +975,106 @@ const buildDirectAnswerPrompt = (prompt: string, history: ConversationTurn[]) =>
     "Do not use filler text.",
     `Conversation context:\n${formatConversationContext(history)}`,
     `User request: ${prompt}`
+  ].join("\n");
+};
+
+const buildSingleTranslationPrompt = (phrase: string, targetLanguage: SupportedTranslationLanguage) => {
+  return [
+    "You are a translation assistant.",
+    `Translate the phrase into ${languageLabel(targetLanguage)}.`,
+    "Return only the translated phrase. No explanation.",
+    `Phrase: ${phrase}`
+  ].join("\n");
+};
+
+const cleanTranslatedText = (value: string) => {
+  return value
+    .replace(/^translation\s*[:\-]\s*/i, "")
+    .replace(/^["'`]|["'`]$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const ensureQuestionPunctuation = (phrase: string) => {
+  const trimmed = phrase.trim();
+  if (/[?.!]$/.test(trimmed)) {
+    return trimmed;
+  }
+  return /^(how|what|where|when|why|who)\b/i.test(trimmed) ? `${trimmed}?` : trimmed;
+};
+
+const looksLikeTranslatedOutput = (value: string, targetLanguage: SupportedTranslationLanguage) => {
+  if (!value || value.length < 2) {
+    return false;
+  }
+  if (targetLanguage === "spanish") {
+    return /[¿¡áéíóúñ]/i.test(value) || /\b(que|como|donde|hasta|buenos)\b/i.test(value);
+  }
+  if (targetLanguage === "french") {
+    return /[àâçéèêëîïôûùüÿœ]/i.test(value) || /\b(bonjour|demain|où|comment)\b/i.test(value);
+  }
+  return true;
+};
+
+const translatePhraseWithModel = async (
+  phrase: string,
+  targetLanguage: SupportedTranslationLanguage
+): Promise<string | null> => {
+  const generator = await initializeLocalPhi();
+  if (!generator) {
+    return null;
+  }
+  try {
+    const output = await generator(buildSingleTranslationPrompt(phrase, targetLanguage), {
+      max_new_tokens: 80,
+      temperature: 0.1,
+      return_full_text: false
+    });
+    const translated = cleanTranslatedText(output[0]?.generated_text ?? "");
+    if (!looksLikeTranslatedOutput(translated, targetLanguage)) {
+      return null;
+    }
+    return translated;
+  } catch {
+    return null;
+  }
+};
+
+export const phiTranslateRequest = async (
+  prompt: string,
+  targetLanguageInput?: string,
+  phrasesInput?: string[]
+): Promise<string> => {
+  const parsedFromPrompt = parseTranslationIntent(prompt);
+  const parsed =
+    targetLanguageInput && phrasesInput && phrasesInput.length > 0
+      ? {
+          targetLanguage: targetLanguageInput as SupportedTranslationLanguage,
+          phrases: phrasesInput
+        }
+      : parsedFromPrompt;
+
+  if (!parsed || parsed.phrases.length === 0) {
+    return "Please share the phrase(s) and target language, for example: Translate \"how are you\" into Spanish.";
+  }
+
+  const translatedRows: Array<{ source: string; translated: string }> = [];
+  for (const phrase of parsed.phrases.slice(0, 8)) {
+    const fromDictionary = translatePhraseFromDictionary(phrase, parsed.targetLanguage);
+    const fromModel = fromDictionary ? null : await translatePhraseWithModel(phrase, parsed.targetLanguage);
+    const translated =
+      fromDictionary ??
+      fromModel ??
+      `(${languageLabel(parsed.targetLanguage)} translation unavailable — please rephrase this phrase)`;
+    translatedRows.push({
+      source: ensureQuestionPunctuation(phrase),
+      translated
+    });
+  }
+
+  return [
+    `Here are the translations in ${languageLabel(parsed.targetLanguage)}:`,
+    ...translatedRows.map((row) => `- ${row.source} -> ${row.translated}`)
   ].join("\n");
 };
 
