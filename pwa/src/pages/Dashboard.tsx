@@ -682,12 +682,14 @@ export default function Dashboard({ session }: DashboardProps) {
                 {debugTraces.map((trace, index) => (
                   <li key={`${trace.at}-${index}`} className="os-list-item">
                     <p>
-                      Route: {trace.route.replaceAll("_", " ")} • Intent: {trace.intent}
+                      Turn #{trace.turn_number} • Route: {trace.route.replaceAll("_", " ")} • Intent:{" "}
+                      {trace.intent}
                     </p>
                     <small>
                       search={trace.search_used ? "yes" : "no"} • pico={trace.pico_used ? "yes" : "no"} •
                       memory={trace.memory_used ? "yes" : "no"} • fallback=
-                      {trace.fallback_triggered ? "yes" : "no"} • quality_guard=
+                      {trace.fallback_triggered ? "yes" : "no"} • template_fallback=
+                      {trace.template_fallback_used ? "yes" : "no"} • quality_guard=
                       {trace.quality_guard_triggered ? "yes" : "no"} •{" "}
                       {new Date(trace.at).toLocaleTimeString()}
                     </small>

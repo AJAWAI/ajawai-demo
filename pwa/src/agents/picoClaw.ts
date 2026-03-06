@@ -16,7 +16,13 @@ import {
 } from "../storage/db";
 import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
-import { getLastPhiDebugMeta, phiDirectAnswer, phiLLM, phiSynthesizeSearchAnswer } from "./phi";
+import {
+  getLastPhiDebugMeta,
+  phiDirectAnswer,
+  phiLLM,
+  phiSynthesizeSearchAnswer,
+  type ConversationTurn
+} from "./phi";
 import { runPublicWebSearch, type PublicWebSearchResult } from "../search/publicWebSearch";
 
 const relayBaseUrl =
@@ -74,6 +80,7 @@ interface CommandOutcome {
 }
 
 export interface CommandDebugInfo {
+  turn_number: number;
   intent: string;
   route:
     | "direct_conversational"
@@ -86,6 +93,7 @@ export interface CommandDebugInfo {
   pico_used: boolean;
   memory_used: boolean;
   fallback_triggered: boolean;
+  template_fallback_used: boolean;
   quality_guard_triggered: boolean;
   at: string;
 }
@@ -148,7 +156,9 @@ const fillerPatterns = [
   /start by defining the exact outcome/i,
   /tell me any constraints/i,
   /best understood by its purpose/i,
-  /i reviewed the request/i
+  /i reviewed the request/i,
+  /^here is a direct answer about/i,
+  /i can also format it as a checklist/i
 ];
 
 const sortByDateDesc = <T>(rows: T[], readDate: (row: T) => string) => {
@@ -483,6 +493,18 @@ export class PicoClawManager {
     throw new Error("No conversation available.");
   }
 
+  private async getConversationHistory(conversationId: string, limit = 10): Promise<ConversationTurn[]> {
+    const rows = await db.messages
+      .where("conversation_id")
+      .equals(conversationId)
+      .toArray();
+    rows.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    return rows.slice(-limit).map((row) => ({
+      role: row.role === "president" ? "user" : row.role === "secretary_phi" ? "assistant" : "system",
+      content: row.content
+    }));
+  }
+
   private async logTimeline(eventType: string, description: string, projectId: string | null) {
     await db.timeline.put({
       id: crypto.randomUUID(),
@@ -728,25 +750,33 @@ export class PicoClawManager {
     return false;
   }
 
-  private async ensureDirectAnswerQuality(question: string, candidate: string) {
+  private async ensureDirectAnswerQuality(
+    question: string,
+    candidate: string,
+    history: ConversationTurn[]
+  ) {
+    const templateFallbackUsed = fillerPatterns.some((pattern) => pattern.test(candidate.trim()));
     if (!this.isLowQualityAnswer(question, candidate)) {
       return {
         answer: candidate,
-        repaired: false
+        repaired: false,
+        templateFallbackUsed
       };
     }
 
-    const repaired = await phiDirectAnswer(question);
+    const repaired = await phiDirectAnswer(question, history);
     if (!this.isLowQualityAnswer(question, repaired)) {
       return {
         answer: repaired,
-        repaired: true
+        repaired: true,
+        templateFallbackUsed: true
       };
     }
 
     return {
       answer: candidate,
-      repaired: false
+      repaired: false,
+      templateFallbackUsed
     };
   }
 
@@ -951,6 +981,9 @@ export class PicoClawManager {
       content: command
     });
 
+    const history = await this.getConversationHistory(conversationId, 12);
+    const turnNumber = history.filter((turn) => turn.role === "user").length;
+
     const conversation = await db.conversations.get(conversationId);
     if (conversation && conversation.title === "New Chat") {
       conversation.title = command.slice(0, 42);
@@ -959,7 +992,7 @@ export class PicoClawManager {
       await db.conversations.put(conversation);
     }
 
-    const phiResult = await phiLLM(command);
+    const phiResult = await phiLLM(command, history);
     const forcedMemorySave = parseMemorySaveFromCommand(command);
     const forcedMemoryRecall = parseMemoryRecallFromCommand(command);
     const effectiveIntent =
@@ -970,12 +1003,14 @@ export class PicoClawManager {
           : phiResult.intent;
     const phiDebug = getLastPhiDebugMeta();
     const debug: CommandDebugInfo = {
+      turn_number: turnNumber,
       intent: effectiveIntent,
       route: "direct_conversational",
       search_used: false,
       pico_used: false,
       memory_used: false,
       fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "heuristic",
+      template_fallback_used: false,
       quality_guard_triggered: false,
       at: nowIso()
     };
@@ -1380,9 +1415,10 @@ export class PicoClawManager {
 
     let finalResponse = this.buildSecretaryFinalResponse(outcome);
     if (debug.route === "direct_conversational" || debug.route === "search_assisted_conversational") {
-      const guarded = await this.ensureDirectAnswerQuality(command, finalResponse);
+      const guarded = await this.ensureDirectAnswerQuality(command, finalResponse, history);
       finalResponse = guarded.answer;
       debug.quality_guard_triggered = guarded.repaired;
+      debug.template_fallback_used = guarded.templateFallbackUsed;
     }
     await this.addSecretaryFinalMessage(conversationId, outcome.type, finalResponse, outcome.details);
     this.invalidateSnapshot();
