@@ -18,11 +18,17 @@ import { localCache } from "../storage/cache";
 import { MANAGER_NAME, SECRETARY_NAME } from "../constants/module3";
 import {
   getLastPhiDebugMeta,
+  chooseResponseMode,
+  isRecipePrompt,
+  isRecipeQualityResponse,
+  isTemplateLikeReply,
+  looksLikePromptEcho,
   phiDirectAnswer,
   phiLLM,
   phiTranslateRequest,
   phiSynthesizeSearchAnswer,
-  type ConversationTurn
+  type ConversationTurn,
+  type ResponseMode
 } from "./phi";
 import { runPublicWebSearch, type PublicWebSearchResult } from "../search/publicWebSearch";
 
@@ -98,6 +104,8 @@ export interface CommandDebugInfo {
   fallback_triggered: boolean;
   template_fallback_used: boolean;
   quality_guard_triggered: boolean;
+  response_mode: ResponseMode;
+  output_truncated: boolean;
   at: string;
 }
 
@@ -157,9 +165,7 @@ const safeText = (value: string | undefined, fallback: string) => {
 const cleanSnippet = (text: string) => text.replace(/\s+/g, " ").trim();
 const fillerPatterns = [
   /start by defining the exact outcome/i,
-  /tell me any constraints/i,
   /best understood by its purpose/i,
-  /i reviewed the request/i,
   /^here is a direct answer about/i,
   /i can also format it as a checklist/i
 ];
@@ -384,24 +390,12 @@ export class PicoClawManager {
     });
   }
 
-  private buildSecretaryFinalResponse(outcome: CommandOutcome): string {
-    switch (outcome.type) {
-      case "informational_answer":
-        return outcome.summary;
-      case "project_created":
-        return `Project created successfully. ${outcome.summary}`;
-      case "task_created":
-        return `Task created and ready. ${outcome.summary}`;
-      case "memory_saved":
-        return `Got it — memory saved. ${outcome.summary}`;
-      case "approval_required":
-        return `${outcome.summary} The action is queued and awaiting your approval.`;
-      case "error_failure":
-        return `I hit an issue: ${outcome.summary}`;
-      case "action_completed":
-      default:
-        return outcome.summary;
-    }
+  private isSystemFailureMessage(answer: string) {
+    return (
+      /^i can’t access the local reasoning model right now/i.test(answer) ||
+      /^i couldn't complete translation because the local model is unavailable/i.test(answer) ||
+      /^i hit an output quality issue/i.test(answer)
+    );
   }
 
   private async getSystemStatusSummary(userId: string) {
@@ -756,12 +750,22 @@ export class PicoClawManager {
     };
   }
 
-  private isLowQualityAnswer(question: string, answer: string) {
+  private isLowQualityAnswer(question: string, answer: string, responseMode: ResponseMode) {
     const normalized = answer.trim();
-    if (normalized.length < 60) {
+    const minLength = responseMode === "brief" ? 24 : 60;
+    if (normalized.length < minLength) {
+      return true;
+    }
+    if (isTemplateLikeReply(normalized)) {
+      return true;
+    }
+    if (looksLikePromptEcho(question, normalized)) {
       return true;
     }
     if (fillerPatterns.some((pattern) => pattern.test(normalized))) {
+      return true;
+    }
+    if (isRecipePrompt(question) && !isRecipeQualityResponse(normalized)) {
       return true;
     }
     const questionTokens = question
@@ -784,11 +788,11 @@ export class PicoClawManager {
       question.toLowerCase().includes("self improve") ||
       question.toLowerCase().includes("inspire me")
     ) {
-      if (normalized.length < 280) {
+      if (responseMode === "comprehensive" && normalized.length < 280) {
         return true;
       }
       const bulletCount = (normalized.match(/\n-/g) ?? []).length;
-      if (bulletCount < 3) {
+      if (responseMode === "comprehensive" && bulletCount < 3) {
         return true;
       }
     }
@@ -799,10 +803,13 @@ export class PicoClawManager {
     question: string,
     candidate: string,
     history: ConversationTurn[],
+    responseMode: ResponseMode,
     memoryGuidance?: string
   ) {
-    const templateFallbackUsed = fillerPatterns.some((pattern) => pattern.test(candidate.trim()));
-    if (!this.isLowQualityAnswer(question, candidate)) {
+    const templateFallbackUsed =
+      fillerPatterns.some((pattern) => pattern.test(candidate.trim())) ||
+      isTemplateLikeReply(candidate);
+    if (!this.isLowQualityAnswer(question, candidate, responseMode)) {
       return {
         answer: candidate,
         repaired: false,
@@ -812,9 +819,10 @@ export class PicoClawManager {
 
     const repaired = await phiDirectAnswer(question, {
       history,
+      responseMode,
       memoryGuidance
     });
-    if (!this.isLowQualityAnswer(question, repaired)) {
+    if (!this.isLowQualityAnswer(question, repaired, responseMode)) {
       return {
         answer: repaired,
         repaired: true,
@@ -827,6 +835,36 @@ export class PicoClawManager {
       repaired: false,
       templateFallbackUsed
     };
+  }
+
+  private async synthesizeToolOutcome(
+    command: string,
+    outcome: CommandOutcome,
+    history: ConversationTurn[],
+    responseMode: ResponseMode,
+    memoryGuidance?: string
+  ) {
+    if (!outcome.ok) {
+      return outcome.summary;
+    }
+    const synthesized = await phiDirectAnswer(command, {
+      history,
+      responseMode: responseMode === "brief" ? "standard" : responseMode,
+      memoryGuidance,
+      toolResultContext: JSON.stringify(
+        {
+          outcome_type: outcome.type,
+          outcome_summary: outcome.summary,
+          outcome_details: outcome.details ?? {}
+        },
+        null,
+        2
+      )
+    });
+    if (this.isSystemFailureMessage(synthesized)) {
+      return outcome.summary;
+    }
+    return synthesized;
   }
 
   private async getContextualMemory(userId: string, command: string) {
@@ -1120,6 +1158,7 @@ export class PicoClawManager {
     const turnNumber = history.filter((turn) => turn.role === "user").length;
     const contextualMemory = await this.getContextualMemory(userId, command);
     const memoryGuidance = this.buildMemoryGuidance(contextualMemory);
+    const responseMode = chooseResponseMode(command);
 
     const conversation = await db.conversations.get(conversationId);
     if (conversation && conversation.title === "New Chat") {
@@ -1147,9 +1186,11 @@ export class PicoClawManager {
       pico_used: false,
       memory_used: contextualMemory.length > 0,
       llm_called: phiDebug.llmCalled,
-      fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "heuristic",
+      fallback_triggered: phiDebug.usedWeakRepair || phiDebug.mode === "system_fallback",
       template_fallback_used: false,
       quality_guard_triggered: false,
+      response_mode: responseMode,
+      output_truncated: phiDebug.outputTruncated,
       at: nowIso()
     };
 
@@ -1415,14 +1456,22 @@ export class PicoClawManager {
             let subject = phiResult.email_subject;
             let body = phiResult.email_body;
             if (!subject || !body) {
-              const draft = await phiLLM(
-                `Draft a short executive email for this request. Request: ${command}`
+              const drafted = await phiDirectAnswer(
+                `Draft a short executive email for this request.\nRequest: ${command}\nReturn format:\nSubject: <subject>\n\n<body>`,
+                {
+                  history,
+                  responseMode: "structured",
+                  memoryGuidance
+                }
               );
-              subject = subject ?? draft.email_subject ?? "AJAWAI Request";
+              const subjectMatch = drafted.match(/subject:\s*(.+)/i);
+              const draftedBody = drafted.replace(/subject:\s*.+/i, "").trim();
+              subject = subject ?? subjectMatch?.[1]?.trim() ?? "AJAWAI Request";
               body =
                 body ??
-                draft.email_body ??
-                "Hello, this is a message from AJAWAI. Please reply with your availability.";
+                (draftedBody.length > 0
+                  ? draftedBody
+                  : "Hello, this is a message from AJAWAI. Please reply with your availability.");
             }
 
             const task = await this.createTask({
@@ -1529,10 +1578,7 @@ export class PicoClawManager {
             outcome = {
               type: "informational_answer",
               ok: true,
-              summary: await phiDirectAnswer(command, {
-                history,
-                memoryGuidance
-              })
+              summary: phiResult.response
             };
             break;
           }
@@ -1564,7 +1610,7 @@ export class PicoClawManager {
         summary:
           error instanceof Error
             ? error.message
-            : "I reviewed the request, but I need more information."
+            : "I hit an execution error while processing that request."
       };
       await this.addMessage({
         conversationId,
@@ -1579,7 +1625,7 @@ export class PicoClawManager {
       );
     }
 
-    let finalResponse = this.buildSecretaryFinalResponse(outcome);
+    let finalResponse = outcome.summary;
     if (debug.route === "translation_direct") {
       if (!this.isTranslationOutputValid(finalResponse)) {
         finalResponse = await phiTranslateRequest(
@@ -1597,20 +1643,32 @@ export class PicoClawManager {
         command,
         finalResponse,
         history,
+        responseMode,
         memoryGuidance
       );
       finalResponse = guarded.answer;
       debug.quality_guard_triggered = guarded.repaired;
       debug.template_fallback_used = guarded.templateFallbackUsed;
+    } else if (outcome.ok) {
+      finalResponse = await this.synthesizeToolOutcome(
+        command,
+        outcome,
+        history,
+        responseMode,
+        memoryGuidance
+      );
+      debug.template_fallback_used = isTemplateLikeReply(finalResponse);
     }
     await this.addSecretaryFinalMessage(conversationId, outcome.type, finalResponse, outcome.details);
     this.invalidateSnapshot();
+    const latestPhiDebug = getLastPhiDebugMeta();
     return {
       ...phiResult,
       response: finalResponse,
       debug: {
         ...debug,
-        llm_called: getLastPhiDebugMeta().llmCalled || debug.llm_called
+        llm_called: latestPhiDebug.llmCalled || debug.llm_called,
+        output_truncated: latestPhiDebug.outputTruncated || debug.output_truncated
       }
     };
   }

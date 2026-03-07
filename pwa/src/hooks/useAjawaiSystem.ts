@@ -6,7 +6,11 @@ import {
   type Module3Snapshot
 } from "../agents/picoClaw";
 import { phiSystemStatus } from "../agents/phi";
-import { syncWithSupabase, type SyncState as SyncStateType } from "../sync/supabaseSync";
+import {
+  syncWithSupabase,
+  type SyncDomainStatusMap,
+  type SyncState as SyncStateType
+} from "../sync/supabaseSync";
 import { supabase } from "../lib/supabase";
 
 const initialSnapshot: Module3Snapshot = {
@@ -27,6 +31,7 @@ interface SyncState {
   state: SyncStateType;
   synced: boolean;
   detail: string;
+  domains?: SyncDomainStatusMap;
   at: string;
 }
 
@@ -108,6 +113,7 @@ export const useAjawaiSystem = (session: Session) => {
         state: "sync_failed",
         synced: false,
         detail: error instanceof Error ? error.message : "Sync failed unexpectedly.",
+        domains: {},
         at: new Date().toISOString()
       };
       setSyncState(failureState);
@@ -124,6 +130,7 @@ export const useAjawaiSystem = (session: Session) => {
         detail: navigator.onLine
           ? `Pending sync: ${reason}`
           : `Offline cache only: ${reason}`,
+        domains: {},
         at: new Date().toISOString()
       };
       setPendingSync(true);
@@ -246,6 +253,8 @@ export const useAjawaiSystem = (session: Session) => {
           fallback_triggered: false,
           template_fallback_used: false,
           quality_guard_triggered: false,
+          response_mode: "standard",
+          output_truncated: false,
           at: new Date().toISOString()
         };
         setDebugTraces((prev) => [errorTrace, ...prev].slice(0, 15));
