@@ -10,6 +10,7 @@ type GeneratorFn = (
 type SupportedTranslationLanguage = "spanish" | "french" | "english";
 
 export type ResponseMode = "brief" | "standard" | "structured" | "comprehensive";
+export const DEBUG_AI = true;
 
 export interface ConversationTurn {
   role: "user" | "assistant" | "system";
@@ -30,10 +31,15 @@ export interface SearchSynthesisInput {
 }
 
 export interface PhiDebugMeta {
-  mode: "heuristic" | "model" | "system_fallback";
+  mode: "heuristic" | "model" | "model_with_retry" | "system_fallback";
   usedWeakRepair: boolean;
   usedSearchHeuristic: boolean;
   llmCalled: boolean;
+  plannerUsed: boolean;
+  reasoningUsed: boolean;
+  writerUsed: boolean;
+  toolUsed: boolean;
+  fallbackTriggered: boolean;
   responseMode: ResponseMode;
   outputTruncated: boolean;
   normalizedPrompt: string;
@@ -73,18 +79,23 @@ interface IntentDecision {
   translationPhrases?: string[];
 }
 
+interface PlannerOutput {
+  intent: string;
+  answer_type: "informational" | "action" | "translation" | "analysis";
+  needs_tools: boolean;
+  requires_search: boolean;
+  plan_steps: string[];
+}
+
 const now = () => new Date().toISOString();
 
 const MODEL_RETRY_COOLDOWN_MS = 12_000;
 const bannedTemplatePatterns = [
   /\bi can help with\b/i,
-  /\bhere is a practical answer\b/i,
-  /\bpractical .*recipe template\b/i,
-  /\bstart with the core objective\b/i,
-  /\bstart by defining the exact outcome\b/i,
+  /\bhere is a practical\b/i,
+  /\bpractical .*recipe\b/i,
   /\bmain ingredient\(s\)\b/i,
-  /\banswer\s*:\s*/i,
-  /\bi can also format it\b/i
+  /\banswer\s*:\s*/i
 ];
 const broadPromptPatterns = [
   /\bwhat is life\b/i,
@@ -147,6 +158,27 @@ const translationLanguageAliases: Array<{
   { alias: "ingles", language: "english" }
 ];
 
+const aiLog = (event: string, data: Record<string, unknown>) => {
+  if (!DEBUG_AI) {
+    return;
+  }
+  console.debug(`[AJAWAI][Phi] ${event}`, data);
+};
+
+const jsonFromText = (text: string) => {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return null;
+  }
+  const candidate = text.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate) as unknown;
+  } catch {
+    return null;
+  }
+};
+
 let generatorPromise: Promise<GeneratorFn | null> | null = null;
 let runtimeState: RuntimeState = "initializing";
 let lastModelError: string | null = null;
@@ -156,6 +188,11 @@ let lastPhiDebugMeta: PhiDebugMeta = {
   usedWeakRepair: false,
   usedSearchHeuristic: false,
   llmCalled: false,
+  plannerUsed: false,
+  reasoningUsed: false,
+  writerUsed: false,
+  toolUsed: false,
+  fallbackTriggered: false,
   responseMode: "standard",
   outputTruncated: false,
   normalizedPrompt: "",
@@ -190,6 +227,12 @@ const sanitizeModelAnswer = (text: string) => {
     .replace(/^response:\s*/i, "")
     .trim();
 };
+
+const cleanQuotedText = (input: string) =>
+  input
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/\s+/g, " ");
 
 const normalizeMemoryKey = (raw: string) => {
   return raw
@@ -250,46 +293,6 @@ const detectTargetLanguage = (prompt: string): SupportedTranslationLanguage | nu
   return bestMatch?.language ?? null;
 };
 
-const normalizeTranslationPhrase = (value: string) => {
-  return value
-    .toLowerCase()
-    .replace(/\bwhat did you to do\b/g, "what did you do")
-    .replace(/\bhow say\b/g, "how do you say")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-};
-
-const splitTranslationPhrases = (input: string): string[] => {
-  const chunks = input
-    .replace(/\bwhat did you to do\b/gi, "what did you do")
-    .replace(/\bin\?\s*/gi, "? ")
-    .split(/\?|\.|;|,(?!\d)|\band\b|\&|\n/gi)
-    .map((chunk) =>
-      chunk
-        .trim()
-        .replace(/^(translate|say|how do you say|how say)\s+/i, "")
-        .replace(
-          /\s+(in|into|to)\s+(spanish|espanol|español|french|francais|français|english|ingles|inglés)\s*$/i,
-          ""
-        )
-    )
-    .map((chunk) => chunk.trim())
-    .filter(Boolean);
-
-  const deduped: string[] = [];
-  const seen = new Set<string>();
-  for (const chunk of chunks) {
-    const key = normalizeTranslationPhrase(chunk);
-    if (!key || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(chunk.replace(/\?+$/, "").trim());
-  }
-  return deduped;
-};
-
 export const parseTranslationIntent = (prompt: string): TranslationIntent | null => {
   const lower = prompt.toLowerCase().trim();
   const hasTranslateSignal =
@@ -304,32 +307,28 @@ export const parseTranslationIntent = (prompt: string): TranslationIntent | null
   if (!targetLanguage) {
     return null;
   }
-
-  const languageForPattern = new RegExp(
-    `\\b(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)\\s+for\\s+(.+)$`,
-    "i"
+  const languageToken =
+    "(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)";
+  const patterns = [
+    new RegExp(`translate\\s+(.+?)\\s+(?:in|into|to)\\s+${languageToken}`, "i"),
+    new RegExp(`how\\s*(?:do\\s*you\\s*)?say\\s+(.+?)\\s+(?:in|into|to)\\s+${languageToken}`, "i"),
+    new RegExp(`${languageToken}\\s+for\\s+(.+)$`, "i")
+  ];
+  const extracted = patterns
+    .map((pattern) => prompt.match(pattern)?.[1])
+    .find((value) => typeof value === "string" && value.trim().length > 0);
+  const sourceText = cleanQuotedText(
+    extracted ??
+      prompt
+        .replace(/\btranslate\b/gi, "")
+        .replace(new RegExp(`\\b(in|into|to)\\s+${languageToken}\\b`, "gi"), "")
   );
-  const howDoYouSayPattern = new RegExp(
-    `how\\s*(?:do\\s*you\\s*)?say\\s+(.+?)\\s+(?:in|into|to)\\s+(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)`,
-    "i"
-  );
-  const translatePattern = new RegExp(
-    `translate\\s+(.+?)\\s+(?:in|into|to)\\s+(?:spanish|espanol|español|french|francais|français|english|ingles|inglés)`,
-    "i"
-  );
-  const sourceText =
-    prompt.match(languageForPattern)?.[1] ??
-    prompt.match(howDoYouSayPattern)?.[1] ??
-    prompt.match(translatePattern)?.[1] ??
-    prompt;
-
-  const phrases = splitTranslationPhrases(sourceText);
-  if (!phrases.length) {
+  if (!sourceText) {
     return null;
   }
   return {
     targetLanguage,
-    phrases
+    phrases: [sourceText]
   };
 };
 
@@ -437,8 +436,7 @@ const buildCoreSystemPrompt = (mode: ResponseMode, userPrompt: string) => {
     "You must reason directly and answer the user's actual request.",
     modeInstruction,
     recipeInstruction,
-    "Strictly avoid template filler and robotic wrappers.",
-    "Never output phrases like: 'I can help with...', 'Here is a practical answer...', 'Answer: <prompt>', or placeholder recipe skeleton text.",
+    "Avoid canned intros and placeholder language.",
     "Answer first. Ask follow-up questions only when information is truly missing.",
     "Do not mention internal routing, pipelines, or tool orchestration.",
     "Stay natural, polished, and high-signal."
@@ -464,7 +462,7 @@ const buildLLMPrompt = (
 };
 
 const buildSystemFailureMessage = () =>
-  "I can’t access the local reasoning model right now. Please retry in a moment.";
+  "I hit an internal reasoning error while generating that response. Please retry.";
 
 export const isTemplateLikeReply = (reply: string) => {
   const trimmed = reply.trim();
@@ -492,9 +490,7 @@ export const isRecipeQualityResponse = (response: string) => {
   );
   const hasTiming = /\b(min|minutes|hour|hours|bake|fry|simmer|cook)\b/i.test(response);
   const hasPlaceholders =
-    /\bmain ingredient\(s\)|seasoning|optional add-ons|practical .* recipe template\b/i.test(
-      lower
-    );
+    /\bmain ingredient\(s\)|seasoning|optional add-ons\b/i.test(lower);
   return hasIngredients && hasSteps && hasMeasurements && hasTiming && !hasPlaceholders;
 };
 
@@ -576,6 +572,37 @@ const runModel = async (
     return_full_text: false
   });
   return sanitizeModelAnswer(output[0]?.generated_text ?? "");
+};
+
+const runModelWithRetry = async (
+  prompt: string,
+  config: { maxNewTokens: number; temperature: number },
+  retries = 1
+) => {
+  let attempt = 0;
+  let lastError: unknown = null;
+  while (attempt <= retries) {
+    try {
+      const output = await runModel(prompt, config);
+      if (output && output.trim().length > 0) {
+        return {
+          output,
+          attempts: attempt + 1,
+          ok: true
+        } as const;
+      }
+      lastError = new Error("Empty model output.");
+    } catch (error) {
+      lastError = error;
+    }
+    attempt += 1;
+  }
+  return {
+    output: "",
+    attempts: attempt,
+    ok: false,
+    error: lastError
+  } as const;
 };
 
 const requiresStatusQuery = (lower: string) =>
@@ -749,6 +776,219 @@ const qualityFailed = (prompt: string, response: string) => {
   );
 };
 
+const buildPlannerPrompt = (
+  prompt: string,
+  history: ConversationTurn[],
+  responseMode: ResponseMode,
+  memoryGuidance?: string,
+  toolResultContext?: string
+) => {
+  return [
+    "Analyze the user's request and determine:",
+    "1) the user's intent",
+    "2) the type of answer needed",
+    "3) whether tools or search are required",
+    "4) a plan for answering",
+    "Return JSON only with keys: intent, answer_type, needs_tools, requires_search, plan_steps.",
+    "answer_type must be one of informational, action, translation, analysis.",
+    `Response mode target: ${responseMode}`,
+    `Conversation history:\n${formatConversationContext(history)}`,
+    memoryGuidance ? `Relevant memory:\n${memoryGuidance}` : "Relevant memory: none",
+    toolResultContext ? `Tool context:\n${toolResultContext}` : "Tool context: none",
+    `User request: ${prompt}`
+  ].join("\n");
+};
+
+const heuristicPlannerOutput = (prompt: string): PlannerOutput => {
+  const normalized = normalizePromptForReasoning(prompt).toLowerCase();
+  return {
+    intent: "conversational",
+    answer_type: parseTranslationIntent(prompt)
+      ? "translation"
+      : broadPromptPatterns.some((pattern) => pattern.test(normalized))
+        ? "analysis"
+        : "informational",
+    needs_tools: false,
+    requires_search: shouldUseWebSearch(prompt),
+    plan_steps: [
+      "Identify the user's core objective.",
+      "Use clear direct reasoning to answer.",
+      "Return polished final response."
+    ]
+  };
+};
+
+export const planner = async (
+  prompt: string,
+  history: ConversationTurn[],
+  responseMode: ResponseMode,
+  memoryGuidance?: string,
+  toolResultContext?: string
+) => {
+  const heuristic = heuristicPlannerOutput(prompt);
+  const plannerPrompt = buildPlannerPrompt(
+    prompt,
+    history,
+    responseMode,
+    memoryGuidance,
+    toolResultContext
+  );
+  const plannerResult = await runModelWithRetry(
+    plannerPrompt,
+    { maxNewTokens: 220, temperature: 0.15 },
+    1
+  );
+  if (!plannerResult.ok) {
+    return {
+      output: heuristic,
+      usedFallback: true
+    } as const;
+  }
+  const parsed = jsonFromText(plannerResult.output);
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    Array.isArray((parsed as { plan_steps?: unknown[] }).plan_steps)
+  ) {
+    const result = parsed as {
+      intent?: string;
+      answer_type?: PlannerOutput["answer_type"];
+      needs_tools?: boolean;
+      requires_search?: boolean;
+      plan_steps?: string[];
+    };
+    return {
+      output: {
+        intent: result.intent ?? heuristic.intent,
+        answer_type: result.answer_type ?? heuristic.answer_type,
+        needs_tools: Boolean(result.needs_tools),
+        requires_search: Boolean(result.requires_search),
+        plan_steps:
+          result.plan_steps?.filter((step): step is string => typeof step === "string") ??
+          heuristic.plan_steps
+      },
+      usedFallback: false
+    } as const;
+  }
+  return {
+    output: heuristic,
+    usedFallback: true
+  } as const;
+};
+
+const buildReasoningPrompt = (
+  plan: PlannerOutput,
+  prompt: string,
+  history: ConversationTurn[],
+  memoryGuidance?: string,
+  toolResultContext?: string
+) => {
+  return [
+    "Think step-by-step about the best response to the user.",
+    "Use the plan below.",
+    `Plan: ${JSON.stringify(plan)}`,
+    `Conversation history:\n${formatConversationContext(history)}`,
+    memoryGuidance ? `Relevant memory:\n${memoryGuidance}` : "Relevant memory: none",
+    toolResultContext ? `Tool context:\n${toolResultContext}` : "Tool context: none",
+    `User request: ${prompt}`,
+    "Return internal reasoning only."
+  ].join("\n\n");
+};
+
+export const reasoning = async (
+  plan: PlannerOutput,
+  prompt: string,
+  history: ConversationTurn[],
+  responseMode: ResponseMode,
+  memoryGuidance?: string,
+  toolResultContext?: string
+) => {
+  const tokenBudget = responseMode === "comprehensive" ? 440 : 300;
+  const reasoningResult = await runModelWithRetry(
+    buildReasoningPrompt(plan, prompt, history, memoryGuidance, toolResultContext),
+    {
+      maxNewTokens: tokenBudget,
+      temperature: 0.25
+    },
+    1
+  );
+  if (!reasoningResult.ok || !reasoningResult.output) {
+    throw new Error("Reasoning pass failed.");
+  }
+  return reasoningResult.output;
+};
+
+const buildWriterPrompt = (
+  reasoningOutput: string,
+  prompt: string,
+  responseMode: ResponseMode,
+  strict = false
+) => {
+  const strictRules = strict
+    ? [
+        "Strict regeneration rules:",
+        "- answer directly",
+        "- no canned intro",
+        "- no prompt restatement",
+        "- no placeholder content"
+      ].join("\n")
+    : "";
+  return [
+    "Write a clear helpful answer for the user.",
+    "Use the reasoning below.",
+    `Reasoning: ${reasoningOutput}`,
+    `Response mode: ${responseMode}`,
+    strictRules,
+    `User request: ${prompt}`,
+    "Return the final answer only."
+  ].join("\n\n");
+};
+
+export const writer = async (
+  reasoningOutput: string,
+  prompt: string,
+  responseMode: ResponseMode,
+  strict = false
+) => {
+  const tokenBudget = getTokenBudget(responseMode, prompt);
+  const writerResult = await runModelWithRetry(
+    buildWriterPrompt(reasoningOutput, prompt, responseMode, strict),
+    {
+      maxNewTokens: tokenBudget,
+      temperature: strict ? 0.2 : 0.35
+    },
+    1
+  );
+  if (!writerResult.ok || !writerResult.output) {
+    throw new Error("Writer pass failed.");
+  }
+  return writerResult.output;
+};
+
+const directWriterFallback = async (
+  prompt: string,
+  history: ConversationTurn[],
+  responseMode: ResponseMode,
+  memoryGuidance?: string,
+  toolResultContext?: string
+) => {
+  const directPrompt = buildLLMPrompt(prompt, {
+    history,
+    memoryGuidance: memoryGuidance ?? "",
+    toolResultContext,
+    responseMode
+  });
+  const direct = await runModelWithRetry(
+    directPrompt,
+    {
+      maxNewTokens: getTokenBudget(responseMode, prompt),
+      temperature: 0.3
+    },
+    1
+  );
+  return direct.ok ? direct.output : "";
+};
+
 export const getPhiRuntimeState = () => runtimeState;
 export const getLastPhiDebugMeta = () => lastPhiDebugMeta;
 
@@ -758,80 +998,104 @@ export const phiDirectAnswer = async (
 ): Promise<string> => {
   const normalizedPrompt = normalizePromptForReasoning(prompt);
   const responseMode = options.responseMode ?? chooseResponseMode(normalizedPrompt);
-  const tokenBudget = getTokenBudget(responseMode, normalizedPrompt);
-  const llmPrompt = buildLLMPrompt(normalizedPrompt, {
-    history: options.history ?? [],
-    memoryGuidance: options.memoryGuidance ?? "",
-    toolResultContext: options.toolResultContext,
-    responseMode
-  });
-
-  let firstPass = "";
-  try {
-    firstPass =
-      (await runModel(llmPrompt, {
-        maxNewTokens: tokenBudget,
-        temperature: 0.35
-      })) ?? "";
-  } catch {
-    firstPass = "";
-  }
-
-  if (!firstPass) {
-    markPhiDebug({
-      mode: "system_fallback",
-      usedWeakRepair: false,
-      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-      llmCalled: false,
-      responseMode,
-      outputTruncated: false,
-      normalizedPrompt
-    });
-    return buildSystemFailureMessage();
-  }
-
-  let finalAnswer = firstPass;
+  const history = options.history ?? [];
+  const memoryGuidance = options.memoryGuidance ?? "";
+  const toolResultContext = options.toolResultContext;
+  let plannerUsed = false;
+  let reasoningUsed = false;
+  let writerUsed = false;
+  let llmCalled = false;
   let usedRepair = false;
-  if (qualityFailed(normalizedPrompt, firstPass)) {
+  let fallbackTriggered = false;
+  let finalAnswer = "";
+
+  try {
+    aiLog("pipeline:start", {
+      responseMode,
+      hasToolContext: Boolean(toolResultContext),
+      historyTurns: history.length
+    });
+    const planResult = await planner(
+      normalizedPrompt,
+      history,
+      responseMode,
+      memoryGuidance,
+      toolResultContext
+    );
+    plannerUsed = true;
+    llmCalled = true;
+    aiLog("pipeline:planner", {
+      usedFallback: planResult.usedFallback,
+      plan: planResult.output
+    });
+
+    const reasoningOutput = await reasoning(
+      planResult.output,
+      normalizedPrompt,
+      history,
+      responseMode,
+      memoryGuidance,
+      toolResultContext
+    );
+    reasoningUsed = true;
+    aiLog("pipeline:reasoning", {
+      length: reasoningOutput.length
+    });
+
+    finalAnswer = await writer(reasoningOutput, normalizedPrompt, responseMode);
+    writerUsed = true;
+    aiLog("pipeline:writer", {
+      length: finalAnswer.length
+    });
+
+    if (qualityFailed(normalizedPrompt, finalAnswer)) {
+      usedRepair = true;
+      finalAnswer = await writer(reasoningOutput, normalizedPrompt, responseMode, true);
+      aiLog("pipeline:writer_repair", {
+        length: finalAnswer.length
+      });
+    }
+
+    if (qualityFailed(normalizedPrompt, finalAnswer)) {
+      throw new Error("Writer output failed quality guard.");
+    }
+  } catch (error) {
+    fallbackTriggered = true;
     usedRepair = true;
-    const repairPrompt = `${llmPrompt}\n\nRegenerate with stricter rules: answer directly, no filler intro, no prompt restatement, no placeholder content.`;
-    try {
-      const repaired =
-        (await runModel(repairPrompt, {
-          maxNewTokens: tokenBudget,
-          temperature: 0.25
-        })) ?? "";
-      if (repaired && !qualityFailed(normalizedPrompt, repaired)) {
-        finalAnswer = repaired;
-      }
-    } catch {
-      // keep first pass
+    aiLog("pipeline:fallback_triggered", {
+      error: error instanceof Error ? error.message : "unknown_error"
+    });
+    const directFallback = await directWriterFallback(
+      normalizedPrompt,
+      history,
+      responseMode,
+      memoryGuidance,
+      toolResultContext
+    );
+    llmCalled = llmCalled || directFallback.length > 0;
+    if (directFallback && !qualityFailed(normalizedPrompt, directFallback)) {
+      finalAnswer = directFallback;
+      writerUsed = true;
+    } else {
+      finalAnswer = buildSystemFailureMessage();
     }
   }
 
-  const truncated = isLikelyTruncated(finalAnswer, tokenBudget);
+  const truncated = isLikelyTruncated(finalAnswer, getTokenBudget(responseMode, normalizedPrompt));
   markPhiDebug({
-    mode: "model",
+    mode: fallbackTriggered ? "model_with_retry" : "model",
     usedWeakRepair: usedRepair,
     usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-    llmCalled: true,
+    llmCalled,
+    plannerUsed,
+    reasoningUsed,
+    writerUsed,
+    toolUsed: Boolean(toolResultContext),
+    fallbackTriggered,
     responseMode,
     outputTruncated: truncated,
     normalizedPrompt
   });
-
-  if (qualityFailed(normalizedPrompt, finalAnswer)) {
-    markPhiDebug({
-      mode: "system_fallback",
-      usedWeakRepair: true,
-      usedSearchHeuristic: shouldUseWebSearch(normalizedPrompt),
-      llmCalled: true,
-      responseMode,
-      outputTruncated: truncated,
-      normalizedPrompt
-    });
-    return "I hit an output quality issue while generating that answer. Please retry once and I’ll regenerate it cleanly.";
-  }
 
   return finalAnswer;
 };
@@ -869,50 +1133,10 @@ export const phiSynthesizeSearchAnswer = async (input: SearchSynthesisInput): Pr
     responseMode: "comprehensive",
     toolResultContext: synthesisPrompt
   });
-  if (
-    !synthesized ||
-    synthesized === buildSystemFailureMessage() ||
-    /^i hit an output quality issue/i.test(synthesized)
-  ) {
+  if (!synthesized || /^i hit an internal reasoning error/i.test(synthesized)) {
     return deterministicSearchSynthesis(input);
   }
   return synthesized;
-};
-
-const ensureQuestionPunctuation = (phrase: string) => {
-  const trimmed = phrase.trim();
-  if (/[?.!]$/.test(trimmed)) {
-    return trimmed;
-  }
-  return /^(how|what|where|when|why|who)\b/i.test(trimmed) ? `${trimmed}?` : trimmed;
-};
-
-const cleanTranslatedText = (value: string) => {
-  return value
-    .replace(/^translation\s*[:\-]\s*/i, "")
-    .replace(/^["'`]|["'`]$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-};
-
-const extractTranslationRows = (output: string) => {
-  const rows = output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- ") || line.includes("->") || line.includes("→"))
-    .map((line) => line.replace(/^-+\s*/, ""));
-  return rows
-    .map((row) => {
-      const split = row.includes("->") ? row.split("->") : row.split("→");
-      if (split.length < 2) {
-        return null;
-      }
-      return {
-        source: cleanTranslatedText(split[0] ?? ""),
-        translated: cleanTranslatedText(split.slice(1).join("->"))
-      };
-    })
-    .filter((row): row is { source: string; translated: string } => Boolean(row?.source && row?.translated));
 };
 
 export const phiTranslateRequest = async (
@@ -933,35 +1157,14 @@ export const phiTranslateRequest = async (
     return "Please provide phrase(s) and a target language, for example: Translate 'how are you' into Spanish.";
   }
 
-  const translationPrompt = [
-    "You are a translation assistant.",
-    `Translate each source phrase into ${languageLabel(parsed.targetLanguage)}.`,
-    "Return only bullet lines in this exact format:",
-    "- <source phrase> -> <translated phrase>",
-    "No explanation text before or after the bullet list.",
-    `Phrases:\n${parsed.phrases.slice(0, 8).map((phrase) => `- ${phrase}`).join("\n")}`
-  ].join("\n");
-
-  let output = "";
-  try {
-    output =
-      (await runModel(translationPrompt, {
-        maxNewTokens: 260,
-        temperature: 0.15
-      })) ?? "";
-  } catch {
-    output = "";
-  }
-
-  const rows = extractTranslationRows(output);
-  if (!rows.length) {
-    return "I couldn’t complete translation because the local model is unavailable right now. Please retry.";
-  }
-
-  return [
-    `Here are the translations in ${languageLabel(parsed.targetLanguage)}:`,
-    ...rows.map((row) => `- ${ensureQuestionPunctuation(row.source)} -> ${row.translated}`)
-  ].join("\n");
+  const sourceText = parsed.phrases.map((phrase) => cleanQuotedText(phrase)).join("\n");
+  const translated = await phiDirectAnswer(
+    `Translate the following text into ${languageLabel(parsed.targetLanguage)}.\nReturn only the translation, preserving line order.\n\n${sourceText}`,
+    {
+      responseMode: "structured"
+    }
+  );
+  return translated || "I hit an internal reasoning error while translating. Please retry.";
 };
 
 export const phiLLM = async (
@@ -977,6 +1180,11 @@ export const phiLLM = async (
       usedWeakRepair: false,
       usedSearchHeuristic: false,
       llmCalled: false,
+      plannerUsed: false,
+      reasoningUsed: false,
+      writerUsed: false,
+      toolUsed: true,
+      fallbackTriggered: false,
       responseMode: chooseResponseMode(normalizedPrompt),
       outputTruncated: false,
       normalizedPrompt
@@ -1002,6 +1210,7 @@ export const phiLLM = async (
 
 export const phiSystemStatus = () => {
   return {
+    debug_ai: DEBUG_AI,
     name: SECRETARY_NAME,
     runtime: runtimeState,
     model: LOCAL_PHI_MODEL,
@@ -1009,6 +1218,11 @@ export const phiSystemStatus = () => {
     model_load_error: lastModelError,
     llm_called: lastPhiDebugMeta.llmCalled,
     llm_mode: lastPhiDebugMeta.mode,
+    planner_used: lastPhiDebugMeta.plannerUsed,
+    reasoning_used: lastPhiDebugMeta.reasoningUsed,
+    writer_used: lastPhiDebugMeta.writerUsed,
+    tool_used: lastPhiDebugMeta.toolUsed,
+    fallback_triggered: lastPhiDebugMeta.fallbackTriggered,
     response_mode: lastPhiDebugMeta.responseMode,
     output_truncated: lastPhiDebugMeta.outputTruncated,
     normalized_prompt: lastPhiDebugMeta.normalizedPrompt,

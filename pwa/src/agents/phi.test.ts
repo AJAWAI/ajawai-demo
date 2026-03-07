@@ -48,7 +48,7 @@ describe("Secretary Phi routing and quality guards", () => {
     ].join("\n");
     const placeholderRecipe = [
       "Ingredients:",
-      "- main ingredient(s)",
+      "- placeholder ingredient",
       "- seasoning",
       "Steps:",
       "1) Cook",

@@ -392,9 +392,8 @@ export class PicoClawManager {
 
   private isSystemFailureMessage(answer: string) {
     return (
-      /^i can’t access the local reasoning model right now/i.test(answer) ||
-      /^i couldn't complete translation because the local model is unavailable/i.test(answer) ||
-      /^i hit an output quality issue/i.test(answer)
+      /^i hit an internal reasoning error/i.test(answer) ||
+      /^i hit an internal reasoning error while translating/i.test(answer)
     );
   }
 
@@ -943,14 +942,14 @@ export class PicoClawManager {
 
   private isTranslationOutputValid(answer: string) {
     const normalized = answer.toLowerCase();
-    const hasArrow = answer.includes("->") || answer.includes("→");
+    const hasContent = answer.trim().length > 2;
     const hasSourceNoise =
       normalized.includes("wikipedia") ||
       normalized.includes("duckduckgo") ||
       normalized.includes("source") ||
       normalized.includes("http://") ||
       normalized.includes("https://");
-    return hasArrow && !hasSourceNoise;
+    return hasContent && !hasSourceNoise;
   }
 
   async approve(approvalId: string, conversationId: string): Promise<ActionResult> {
@@ -1156,7 +1155,12 @@ export class PicoClawManager {
 
     const history = await this.getConversationHistory(conversationId, 12);
     const turnNumber = history.filter((turn) => turn.role === "user").length;
-    const contextualMemory = await this.getContextualMemory(userId, command);
+    let contextualMemory: MemoryEntry[] = [];
+    try {
+      contextualMemory = await this.getContextualMemory(userId, command);
+    } catch {
+      contextualMemory = [];
+    }
     const memoryGuidance = this.buildMemoryGuidance(contextualMemory);
     const responseMode = chooseResponseMode(command);
 

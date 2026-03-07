@@ -716,7 +716,11 @@ export default function Dashboard({ session }: DashboardProps) {
               <p>
                 Model: {phiStatus.runtime} • Ready: {phiStatus.model_ready ? "yes" : "no"} • Last
                 mode: {phiStatus.llm_mode} • Response mode: {phiStatus.response_mode} • LLM called:{" "}
-                {phiStatus.llm_called ? "yes" : "no"} • Truncated:{" "}
+                {phiStatus.llm_called ? "yes" : "no"} • planner=
+                {phiStatus.planner_used ? "yes" : "no"} • reasoning=
+                {phiStatus.reasoning_used ? "yes" : "no"} • writer=
+                {phiStatus.writer_used ? "yes" : "no"} • fallback=
+                {phiStatus.fallback_triggered ? "yes" : "no"} • Truncated:{" "}
                 {phiStatus.output_truncated ? "yes" : "no"}
               </p>
               {phiStatus.model_load_error ? <small>{phiStatus.model_load_error}</small> : null}
